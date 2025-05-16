@@ -31,7 +31,7 @@ int main() {
     struct sockaddr_in *peer_addr /*相手サーバーのアドレス構造体を入れるポインタ*/;
     Arg_AppendEntries arg_buffer;
     Res_AppendEntries res_buffer;
-    unsigned int addr_len;
+    socklen_t addr_len;
     unsigned int num_agreed;
     unsigned int num_node = NUM_NODE;
     unsigned int majority = num_node / 2 + 1;
@@ -52,8 +52,8 @@ int main() {
         exit(EXIT_FAILURE);
     }
     /*サーバー情報の初期化*/
+    memset(servers, 0, sizeof(servers));
     for (int i = 0; i < num_node; i++) {
-        memset(&(servers[i]), 0, sizeof(servers[i]));
         servers[i].id = i;
         servers[i].status = follower;
         servers[i].nm = alive;
@@ -77,7 +77,7 @@ int main() {
                 continue;
             peer_addr = &(servers[i].serv_addr);
             addr_len = sizeof(*peer_addr);
-
+            print_sockaddr_in(peer_addr, "peer_addr");
             if (sendto(sock, &arg_buffer, sizeof(arg_buffer), 0,
                        (struct sockaddr *)peer_addr, addr_len) < 0) {
                 perror("sendto() failed");
@@ -95,7 +95,7 @@ int main() {
                 peer_addr = &(servers[i].serv_addr);
                 addr_len = sizeof(peer_addr);
                 if (recvfrom(sock, &res_buffer, sizeof(res_buffer), 0,
-                             (struct sockaddr *)&(peer_addr), &addr_len) < 0) {
+                             (struct sockaddr *)peer_addr, &addr_len) < 0) {
                     if (errno == EWOULDBLOCK) {
                         /*フォロワーから時間内に応答がなければスキップ*/
                         servers[i].nm = dead;

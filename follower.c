@@ -35,7 +35,7 @@ int main(int argc, char **argv) {
     Res_AppendEntries res_buffer;
     unsigned int self_id;
     unsigned int leaderID = LEADER_ID;
-    unsigned int addr_len;
+    socklen_t addr_len;
     unsigned int num_node = NUM_NODE;
     unsigned int majority = num_node / 2 + 1;
     struct timeval election_timeout;
@@ -60,8 +60,8 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
     /*サーバー情報の初期化*/
+    memset(servers, 0, sizeof(servers));
     for (int i = 0; i < num_node; i++) {
-        memset(&(servers[i]), 0, sizeof(servers[i]));
         servers[i].id = i;
         servers[i].status = follower;
         servers[i].nm = alive;
@@ -80,6 +80,7 @@ int main(int argc, char **argv) {
         /*****************************************************************************/
         peer_addr = &(servers[leaderID].serv_addr);
         addr_len = sizeof(*peer_addr);
+        print_sockaddr_in(peer_addr, "peer_addr");
         if (recvfrom(sock, &arg_buffer, sizeof(arg_buffer), 0,
                      (struct sockaddr *)peer_addr, &addr_len) < 0) {
             if (errno == EWOULDBLOCK) {
