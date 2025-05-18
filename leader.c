@@ -69,6 +69,7 @@ int main() {
         exit(EXIT_FAILURE);
     }
     printf("Program Start\n");
+    sleep(3);
     while (1) {
         num_agreed = 0;
         /*ハートビートとしてsendをばらまく*/
@@ -93,7 +94,7 @@ int main() {
                 if (i == self_id)
                     continue;
                 peer_addr = &(servers[i].serv_addr);
-                addr_len = sizeof(peer_addr);
+                addr_len = sizeof(*peer_addr);
                 if (recvfrom(sock, &res_buffer, sizeof(res_buffer), 0,
                              (struct sockaddr *)peer_addr, &addr_len) < 0) {
                     if (errno == EWOULDBLOCK) {

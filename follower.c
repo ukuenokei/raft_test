@@ -69,7 +69,7 @@ int main(int argc, char **argv) {
         servers[i].serv_addr.sin_addr.s_addr = inet_addr(IP);
         servers[i].serv_addr.sin_port = htons(PORT + i);
     }
-
+    sleep(5);
     self_addr = &(servers[self_id].serv_addr);
     self_addr->sin_addr.s_addr = INADDR_ANY;
     if (bind(sock, (struct sockaddr *)self_addr, sizeof(*self_addr))) {
