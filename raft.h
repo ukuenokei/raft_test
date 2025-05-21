@@ -1,11 +1,16 @@
 #include <arpa/inet.h>
 
+#define STARTUP_LATANCY_SEC 5
 #define LOG_INDEX_MAX 100
 
 enum Status {
     leader,
     candidate,
     follower
+};
+enum Agreed {
+    agreed,
+    disagreed
 };
 
 enum NodeMap {
@@ -31,10 +36,10 @@ typedef struct {
 
 typedef struct {
     unsigned int term;
-    unsigned int sucess;
+    unsigned int success;
 } Res_AppendEntries;
 
 // typedef struct {
 //   unsigned int term;
-//   unsigned int sucess;
+//   unsigned int success;
 // } Res_RequestVote;
