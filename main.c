@@ -10,8 +10,9 @@
 #include "raft.h"
 #include "testparam.h"
 
+#define RETRY_MAX 3
 #define INTERVAL 3
-#define TIMEOUT_SEC 1
+#define TIMEOUT_SEC 3
 #define TIMEOUT_USEC 0
 
 Server servers[MAX_NUM_NODE] /*全ノード情報の構造体が入った配列*/;
@@ -80,7 +81,7 @@ int leader_func(int sock) {
                 if (errno == EWOULDBLOCK) {
                     /*フォロワーから時間内に応答がなければスキップ*/
                     servers[i].nm = dead;
-                    // printf("Server[%d] recv timeout\n", i);
+                    printf("Server[%d] recv timeout\n", i);
                     continue;
                 } else {
                     /*それ以外は終了*/
@@ -108,6 +109,7 @@ int leader_func(int sock) {
 }
 
 int follower_func(int sock) {
+    unsigned int recv_retry_cnt;
     struct sockaddr_in *peer_addr /*相手サーバーのアドレス構造体を入れるポインタ*/;
     struct timeval election_timeout;
     socklen_t addr_len;
@@ -118,22 +120,29 @@ int follower_func(int sock) {
     currentTerm = 0;
     election_timeout.tv_sec = TIMEOUT_SEC;
     election_timeout.tv_usec = TIMEOUT_USEC;
+
     if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &election_timeout, sizeof(election_timeout)) <
         0) {
         perror("setsockopt(RCVTIMEO) failed");
         exit(EXIT_FAILURE);
     }
+    recv_retry_cnt = 0;
     while (1) {
         /*****************************************************************************/
         peer_addr = &(servers[leaderID].serv_addr);
         addr_len = sizeof(*peer_addr);
-        // print_sockaddr_in(peer_addr, "peer_addr");
+
         if (recvfrom(sock, &arg_buffer, sizeof(arg_buffer), 0,
                      (struct sockaddr *)peer_addr, &addr_len) < 0) {
             if (errno == EWOULDBLOCK) {
+                recv_retry_cnt++;
                 /*選挙タイムアウトしたらリーダーの死亡認定*/
-                servers[leaderID].nm = dead;
-                printf("Leader Dead\n");
+                if (recv_retry_cnt == RETRY_MAX) {
+                    servers[leaderID].nm = dead;
+                    printf("Leader Dead\n");
+                    recv_retry_cnt = 0;
+                    // 選挙を開始する
+                }
             } else {
                 /*それ以外は終了*/
                 perror("recvfrom() failed");
@@ -142,6 +151,7 @@ int follower_func(int sock) {
         } else {
             /*成功応答*/
             printf("HB receved\n");
+            recv_retry_cnt = 0;
             servers[leaderID].status = alive;
             // print_sockaddr_in(peer_addr, "peer_addr");
             memset(&res_buffer, 0, sizeof(res_buffer));

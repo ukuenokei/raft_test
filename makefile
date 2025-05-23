@@ -1,4 +1,4 @@
-TARGET	= leader follower
+TARGET	= main leader follower
 SRCS 	= leader.c follower.c
 OBJS 	= $(SRCS:.c=.o)
 CC  	= gcc
@@ -9,6 +9,9 @@ CFLAGS	= -g
 # 	$(CC) -o $@ $^ $(LIBDIR)$(LIBS)
 
 all: $(TARGET)
+
+main : main.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LIBDIR)$(LIBS)
 
 leader: leader.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LIBDIR)$(LIBS)
