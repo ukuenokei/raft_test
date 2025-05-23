@@ -5,6 +5,8 @@
 
 #define LEADER_ID 0
 
+#define LOG_MESSAGE "Log message [%d]"
+
 void print_sockaddr_in(const struct sockaddr_in *addr, const char *label) {
     char ip_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &(addr->sin_addr), ip_str, sizeof(ip_str));

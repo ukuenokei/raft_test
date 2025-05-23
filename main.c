@@ -22,7 +22,8 @@ unsigned int leaderID;
 
 unsigned int currentTerm;
 unsigned int votedFor;
-char log[LOG_INDEX_MAX];
+Log_Entry log[LOG_INDEX_MAX];
+unsigned int logLength;
 
 unsigned int commitIndex;
 unsigned int lastApplied;
@@ -31,7 +32,7 @@ unsigned int nextIndex[LOG_INDEX_MAX];
 unsigned int matchIndex[LOG_INDEX_MAX];
 
 int leader_func(int sock) {
-    unsigned int agreed; /*T/F*/
+    unsigned int majority_agreed; /*T/F*/
     unsigned int num_agreed;
     unsigned int majority = num_node / 2 + 1;
 
@@ -50,6 +51,9 @@ int leader_func(int sock) {
     }
 
     while (1) {
+        for (int i = 0; i < num_node; i++) {
+            servers[i].agreed = undecided;
+        }
         num_agreed = 1;
         /*ハートビートとしてsendをばらまく*/
         for (int i = 0; i < num_node; i++) {
@@ -69,7 +73,7 @@ int leader_func(int sock) {
 
         /*****************************************************************************/
         /*過半数からレシーブできるまで待つ*/
-        agreed = 0;
+        majority_agreed = 0;
         for (int i = 0; i < num_node; i++) {
             if (i == self_id)
                 continue;
@@ -93,6 +97,7 @@ int leader_func(int sock) {
                 printf("HB receved [%d]\t", i);
                 servers[i].nm = alive;
                 if (res_buffer.success == 0) {
+                    servers[i].agreed = agreed;
                     num_agreed++;
                     printf("Agreed:%d\t", num_agreed);
                 }
@@ -102,10 +107,27 @@ int leader_func(int sock) {
 
         if (num_agreed > majority) {
             printf("Majority Agreed\n");
-            agreed = 1;
+            majority_agreed = 1;
         }
         sleep(INTERVAL);
     }
+}
+
+Res_AppendEntries AppendEntries(Arg_AppendEntries *arg_appendentries) {
+    Res_AppendEntries res_appendentries;
+    // リーダーが認識しているタームが遅れている
+    if (arg_appendentries->term < currentTerm) {
+        res_appendentries.success = FAILURE;
+    }
+    if (log[arg_appendentries->prevLogIndex].term != arg_appendentries->prevLogTerm) {
+        res_appendentries.success = FAILURE;
+    }
+    if (logLength <= arg_appendentries->prevLogIndex) {
+        res_appendentries.success = FAILURE;
+    }
+
+    res_appendentries.term = currentTerm;
+    return res_appendentries;
 }
 
 int follower_func(int sock) {
@@ -153,8 +175,9 @@ int follower_func(int sock) {
             printf("HB receved\n");
             recv_retry_cnt = 0;
             servers[leaderID].status = alive;
-            // print_sockaddr_in(peer_addr, "peer_addr");
             memset(&res_buffer, 0, sizeof(res_buffer));
+            // AppendEntriesを開始する
+
             if (sendto(sock, &res_buffer, sizeof(res_buffer), 0,
                        (struct sockaddr *)peer_addr, addr_len) < 0) {
                 perror("sendto() failed");
