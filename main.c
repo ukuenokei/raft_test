@@ -394,7 +394,7 @@ int main(int argc, char **argv) {
             break;
         case RES_AppendEntries:
             pt_node->nm = alive;
-            if (res_buffer.success == SUCCESS) {
+            if (packet_buf->res_appendentries.success == SUCCESS) {
                 pt_node->agreed = agreed;
                 num_agreed++;
                 printf("Agreed:%d", num_agreed);
