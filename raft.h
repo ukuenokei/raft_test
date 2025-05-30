@@ -2,9 +2,15 @@
 
 #define STARTUP_LATANCY_SEC 5
 #define LOG_INDEX_MAX 100
+#define MAX_COMMAND_LEN 20
+#define MAX_NUM_ENTRIES 3
 
 #define SUCCESS 0
 #define FAILURE 1
+
+int min(int a, int b) {
+    return (a < b) ? a : b;
+}
 
 enum Status {
     leader,
@@ -21,26 +27,36 @@ enum NodeMap {
     alive,
     dead
 };
-
-typedef struct {
+typedef struct _Index {
+    unsigned int index;
+    struct _Index *next;
+} Index;
+typedef struct _Log_Entry {
     unsigned int term;
-    char log_command[LOG_INDEX_MAX];
+    char log_command[MAX_COMMAND_LEN];
 } Log_Entry;
 
-typedef struct {
+typedef struct _Node_Info {
     unsigned int id;
     struct sockaddr_in serv_addr;
     enum Status status;
     enum Agreed agreed;
     enum NodeMap nm;
-} Server;
+    // Volatile state on leader: (選挙後に再初期化)
+    // 各サーバに対して、そのサーバに送信する次のログエントリのインデックス (リーダーの最後のログインデックス + 1 に初期化)。
+    unsigned int nextIndex;
+    // 各サーバに対して、そのサーバで複製されていることが分かっている最も大きいログエントリのインデックス (0に初期化され単調増加)。
+    unsigned int matchIndex;
+    struct _Node_Info *next;
+} Node_Info;
 
 typedef struct {
     unsigned int term;
     unsigned int leaderId;
     unsigned int prevLogIndex;
     unsigned int prevLogTerm;
-    Log_Entry entries; // 効率のため複数送信できるようにする
+    Log_Entry *entries; // FIXME:効率のため複数送信できるようにする
+    unsigned int entries_len;
     unsigned int leaderCommit;
 } Arg_AppendEntries;
 

@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,77 +16,166 @@
 #define TIMEOUT_SEC 3
 #define TIMEOUT_USEC 0
 
-Server servers[MAX_NUM_NODE] /*全ノード情報の構造体が入った配列*/;
+/*全ノード情報の構造体が入った配列*/
+Node_Info *node, *node_tail, *node_self, *node_leader;
 unsigned int num_node;
 unsigned int self_id;
 unsigned int leaderID;
 
+// Persistent state on all services: (RPC に応答する前に安定記憶装置を更新する)
 unsigned int currentTerm;
 unsigned int votedFor;
-Log_Entry log[LOG_INDEX_MAX];
-unsigned int logLength;
+Log_Entry entries[LOG_INDEX_MAX];
+unsigned int lastLogIndex;
 
+// Volatile state on all servers:
 unsigned int commitIndex;
 unsigned int lastApplied;
 
-unsigned int nextIndex[LOG_INDEX_MAX];
-unsigned int matchIndex[LOG_INDEX_MAX];
+// Volatile state on leader: (選挙後に再初期化)
+// 各サーバに対して、そのサーバに送信する次のログエントリのインデックス (リーダーの最後のログインデックス + 1 に初期化)。
+// Index *nextIndex;
+// 各サーバに対して、そのサーバで複製されていることが分かっている最も大きいログエントリのインデックス (0に初期化され単調増加)。
+// Index *matchIndex;
+
+int init_nodeinfo() {
+    Node_Info *tmp_node;
+    // Index *tmp_nextIndex, *tmp_matchIndex;
+    for (int i = 0; i < num_node; i++) {
+        tmp_node = (Node_Info *)malloc(sizeof(Node_Info));
+        if (tmp_node == NULL) {
+            perror("Failed to allocate memory for node");
+            return -1;
+        }
+        tmp_node->id = i;
+        tmp_node->status = follower;
+        tmp_node->nm = alive;
+        tmp_node->serv_addr.sin_family = AF_INET;
+        tmp_node->serv_addr.sin_addr.s_addr = inet_addr(IP);
+        tmp_node->serv_addr.sin_port = htons(PORT + i);
+        tmp_node->nextIndex = 1;
+        tmp_node->matchIndex = 0;
+        tmp_node->next = NULL;
+
+        if (node == NULL) {
+            node = tmp_node;
+            node_tail = node;
+        } else {
+            node_tail->next = tmp_node;
+            node_tail = tmp_node;
+        }
+        if (i == self_id) {
+            node_self = tmp_node;
+        }
+    }
+}
+
+void cleanup_nodeinfo(void) {
+    Node_Info *current_node = node;
+    Node_Info *next_node;
+
+    while (current_node != NULL) {
+        next_node = current_node->next;
+        free(current_node);
+        current_node = next_node;
+    }
+
+    node = NULL;
+    node_tail = NULL;
+    node_self = NULL;
+    node_leader = NULL;
+}
+
+int init_log_info() {
+    Node_Info *pt_node;
+    pt_node = node;
+    while (pt_node) {
+        pt_node->nextIndex = lastLogIndex + 1;
+        pt_node->matchIndex = 0;
+        pt_node = pt_node->next;
+    }
+}
 
 int leader_func(int sock) {
+    Node_Info *pt_node = NULL;
     unsigned int majority_agreed; /*T/F*/
     unsigned int num_agreed;
     unsigned int majority = num_node / 2 + 1;
-
-    struct sockaddr_in *peer_addr /*相手サーバーのアドレス構造体を入れるポインタ*/;
+    /*相手サーバーのアドレス構造体を入れるポインタ*/
+    struct sockaddr_in *peer_addr;
     socklen_t addr_len;
     struct timeval recv_timeout;
-    recv_timeout.tv_sec = TIMEOUT_SEC;
-    recv_timeout.tv_usec = TIMEOUT_USEC;
     Arg_AppendEntries arg_buffer;
     Res_AppendEntries res_buffer;
 
-    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout)) <
-        0) {
+    recv_timeout.tv_sec = TIMEOUT_SEC;
+    recv_timeout.tv_usec = TIMEOUT_USEC;
+
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+                   &recv_timeout, sizeof(recv_timeout)) < 0) {
         perror("setsockopt(RCVTIMEO) failed");
         exit(EXIT_FAILURE);
     }
-
+    init_log_info();
     while (1) {
-        for (int i = 0; i < num_node; i++) {
-            servers[i].agreed = undecided;
+        pt_node = node;
+        while (pt_node) {
+            pt_node->agreed = undecided;
+            pt_node = pt_node->next;
         }
+
         num_agreed = 1;
         /*ハートビートとしてsendをばらまく*/
-        for (int i = 0; i < num_node; i++) {
-            if (i == self_id)
+        pt_node = node;
+        while (pt_node) {
+            if (pt_node->id == self_id) {
+                pt_node = pt_node->next;
                 continue;
-            peer_addr = &(servers[i].serv_addr);
+            }
+            peer_addr = &(pt_node->serv_addr);
             addr_len = sizeof(*peer_addr);
+
+            /*arg_bufferの初期化*/
             memset(&arg_buffer, 0, sizeof(arg_buffer));
             // print_sockaddr_in(peer_addr, "peer_addr");
+            arg_buffer.term = currentTerm;
+            arg_buffer.leaderId = leaderID;
+            arg_buffer.prevLogIndex = pt_node->matchIndex;
+            arg_buffer.prevLogTerm = entries[arg_buffer.prevLogIndex].term;
+            arg_buffer.entries_len = 1; // とりあえず1件
+            arg_buffer.entries = malloc(sizeof(arg_buffer.entries) * arg_buffer.entries_len);
+            strcpy(arg_buffer.entries[0].log_command, LOG_MESSAGE);
+            arg_buffer.leaderCommit = commitIndex;
+
             if (sendto(sock, &arg_buffer, sizeof(arg_buffer), 0,
                        (struct sockaddr *)peer_addr, addr_len) < 0) {
                 perror("sendto() failed");
                 exit(EXIT_FAILURE);
             }
+            pt_node = pt_node->next;
         }
         sleep(INTERVAL);
 
         /*****************************************************************************/
         /*過半数からレシーブできるまで待つ*/
         majority_agreed = 0;
-        for (int i = 0; i < num_node; i++) {
-            if (i == self_id)
+        pt_node = node;
+        while (pt_node) {
+            if (pt_node->id == self_id) {
+                pt_node = pt_node->next;
                 continue;
-            peer_addr = &(servers[i].serv_addr);
+            }
+            peer_addr = &(pt_node->serv_addr);
             addr_len = sizeof(*peer_addr);
             // print_sockaddr_in(peer_addr, "peer_addr");
+
             if (recvfrom(sock, &res_buffer, sizeof(res_buffer), 0,
                          (struct sockaddr *)peer_addr, &addr_len) < 0) {
                 if (errno == EWOULDBLOCK) {
                     /*フォロワーから時間内に応答がなければスキップ*/
-                    servers[i].nm = dead;
-                    printf("Server[%d] recv timeout\n", i);
+                    pt_node->nm = dead;
+                    printf("Server[%d] recv timeout\n", pt_node->id);
+                    pt_node = pt_node->next;
                     continue;
                 } else {
                     /*それ以外は終了*/
@@ -94,15 +184,19 @@ int leader_func(int sock) {
                 }
             } else {
                 /*recv成功時*/
-                printf("HB receved [%d]\t", i);
-                servers[i].nm = alive;
-                if (res_buffer.success == 0) {
-                    servers[i].agreed = agreed;
+                printf("HB receved [%d]\t[%d]\t", pt_node->id, res_buffer.success);
+                pt_node->nm = alive;
+                if (res_buffer.success == SUCCESS) {
+                    pt_node->agreed = agreed;
                     num_agreed++;
-                    printf("Agreed:%d\t", num_agreed);
+                    printf("Agreed:%d", num_agreed);
+
+                    pt_node->nextIndex++;
+                    pt_node->matchIndex++;
                 }
             }
             printf("\n");
+            pt_node = pt_node->next;
         }
 
         if (num_agreed > majority) {
@@ -115,22 +209,36 @@ int leader_func(int sock) {
 
 Res_AppendEntries AppendEntries(Arg_AppendEntries *arg_appendentries) {
     Res_AppendEntries res_appendentries;
-    // リーダーが認識しているタームが遅れている
+    res_appendentries.success = SUCCESS;
+    // リーダーが認識しているタームが遅れている場合はfalse
     if (arg_appendentries->term < currentTerm) {
         res_appendentries.success = FAILURE;
     }
-    if (log[arg_appendentries->prevLogIndex].term != arg_appendentries->prevLogTerm) {
-        res_appendentries.success = FAILURE;
-    }
-    if (logLength <= arg_appendentries->prevLogIndex) {
+    // 直前のログのインデックスとタームが同一でない場合は、ログが一貫していないのでfalse
+    if (entries[arg_appendentries->prevLogIndex].term != arg_appendentries->prevLogTerm ||
+        lastLogIndex < arg_appendentries->prevLogIndex) {
         res_appendentries.success = FAILURE;
     }
 
+    if (res_appendentries.success == SUCCESS) {
+        // ログを自身に適用
+        for (int i = 0; i < arg_appendentries->entries_len; i++) {
+            entries[arg_appendentries->prevLogIndex + i].term = arg_appendentries->term;
+            strcpy(entries[arg_appendentries->prevLogIndex + i].log_command, arg_appendentries->entries[i].log_command);
+        }
+    }
+
+    if (arg_appendentries->leaderCommit > commitIndex) {
+        commitIndex = min(arg_appendentries->leaderCommit,
+                          arg_appendentries->prevLogIndex + arg_appendentries->entries_len);
+    }
+    currentTerm = arg_appendentries->term;
     res_appendentries.term = currentTerm;
     return res_appendentries;
 }
 
 int follower_func(int sock) {
+    Node_Info *pt_node = NULL;
     unsigned int recv_retry_cnt;
     struct sockaddr_in *peer_addr /*相手サーバーのアドレス構造体を入れるポインタ*/;
     struct timeval election_timeout;
@@ -143,15 +251,15 @@ int follower_func(int sock) {
     election_timeout.tv_sec = TIMEOUT_SEC;
     election_timeout.tv_usec = TIMEOUT_USEC;
 
-    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &election_timeout, sizeof(election_timeout)) <
-        0) {
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+                   &election_timeout, sizeof(election_timeout)) < 0) {
         perror("setsockopt(RCVTIMEO) failed");
         exit(EXIT_FAILURE);
     }
     recv_retry_cnt = 0;
     while (1) {
         /*****************************************************************************/
-        peer_addr = &(servers[leaderID].serv_addr);
+        peer_addr = &(node_leader->serv_addr);
         addr_len = sizeof(*peer_addr);
 
         if (recvfrom(sock, &arg_buffer, sizeof(arg_buffer), 0,
@@ -160,7 +268,7 @@ int follower_func(int sock) {
                 recv_retry_cnt++;
                 /*選挙タイムアウトしたらリーダーの死亡認定*/
                 if (recv_retry_cnt == RETRY_MAX) {
-                    servers[leaderID].nm = dead;
+                    node_leader->nm = dead;
                     printf("Leader Dead\n");
                     recv_retry_cnt = 0;
                     // 選挙を開始する
@@ -174,9 +282,10 @@ int follower_func(int sock) {
             /*成功応答*/
             printf("HB receved\n");
             recv_retry_cnt = 0;
-            servers[leaderID].status = alive;
+            node_leader->status = alive;
             memset(&res_buffer, 0, sizeof(res_buffer));
             // AppendEntriesを開始する
+            res_buffer = AppendEntries(&arg_buffer);
 
             if (sendto(sock, &res_buffer, sizeof(res_buffer), 0,
                        (struct sockaddr *)peer_addr, addr_len) < 0) {
@@ -192,6 +301,7 @@ int follower_func(int sock) {
 int main(int argc, char **argv) {
     int sock;
     struct sockaddr_in *self_addr /*自身のアドレス構造体を入れるポインタ*/;
+    Node_Info *pt_node = NULL;
 
     if (argc != 3) {
         printf("Usage: %s <total node number> <my node id>\n", argv[0]);
@@ -203,24 +313,38 @@ int main(int argc, char **argv) {
     self_id = atoi(argv[2]);
 
     leaderID = LEADER_ID;
+    node = NULL;
+    node_tail = NULL;
+    node_self = NULL;
+
+    lastLogIndex = 0;
 
     /*サーバー情報の初期化*/
-    memset(servers, 0, sizeof(servers));
+    // memset(servers, 0, sizeof(servers));
 
-    for (int i = 0; i < num_node; i++) {
-        servers[i].id = i;
-        servers[i].status = follower;
-        servers[i].nm = alive;
-        servers[i].serv_addr.sin_family = AF_INET;
-        servers[i].serv_addr.sin_addr.s_addr = inet_addr(IP);
-        servers[i].serv_addr.sin_port = htons(PORT + i);
-    }
+    // for (int i = 0; i < num_node; i++) {
+    //     pt_node = (Node_Info *)malloc(sizeof(Node_Info));
+    //     pt_node->id = i;
+    //     pt_node->status = follower;
+    //     pt_node->nm = alive;
+    //     pt_node->serv_addr.sin_family = AF_INET;
+    //     pt_node->serv_addr.sin_addr.s_addr = inet_addr(IP);
+    //     pt_node->serv_addr.sin_port = htons(PORT + i);
+    // }
 
-    self_addr = &(servers[self_id].serv_addr);
-
+    init_nodeinfo();
+    self_addr = &(node_self->serv_addr);
     if (self_id == leaderID) {
-        servers[self_id].status = leader;
         self_addr->sin_addr.s_addr = INADDR_ANY;
+    }
+    pt_node = node;
+    while (pt_node) {
+        if (pt_node->id == leaderID) {
+            node_leader = pt_node;
+            node_leader->status = leader;
+        }
+
+        pt_node = pt_node->next;
     }
 
     if ((sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
@@ -238,7 +362,7 @@ int main(int argc, char **argv) {
     sleep(STARTUP_LATANCY_SEC);
 
     while (1) {
-        switch (servers[self_id].status) {
+        switch (node_self->status) {
         case leader:
             /* code */
             leader_func(sock);
