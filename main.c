@@ -300,7 +300,10 @@ int follower_func(int sock) {
 
 int main(int argc, char **argv) {
     int sock;
-    struct sockaddr_in *self_addr /*自身のアドレス構造体を入れるポインタ*/;
+    int res;
+    Raft_Packet *packet_buf;
+    struct sockaddr_in *tmp_addr, *self_addr;
+    socklen_t tmp_addrlen;
     Node_Info *pt_node = NULL;
 
     if (argc != 3) {
@@ -319,23 +322,10 @@ int main(int argc, char **argv) {
 
     lastLogIndex = 0;
 
-    /*サーバー情報の初期化*/
-    // memset(servers, 0, sizeof(servers));
-
-    // for (int i = 0; i < num_node; i++) {
-    //     pt_node = (Node_Info *)malloc(sizeof(Node_Info));
-    //     pt_node->id = i;
-    //     pt_node->status = follower;
-    //     pt_node->nm = alive;
-    //     pt_node->serv_addr.sin_family = AF_INET;
-    //     pt_node->serv_addr.sin_addr.s_addr = inet_addr(IP);
-    //     pt_node->serv_addr.sin_port = htons(PORT + i);
-    // }
-
     init_nodeinfo();
-    self_addr = &(node_self->serv_addr);
+
     if (self_id == leaderID) {
-        self_addr->sin_addr.s_addr = INADDR_ANY;
+        node_self->serv_addr.sin_addr.s_addr = INADDR_ANY;
     }
     pt_node = node;
     while (pt_node) {
@@ -362,18 +352,76 @@ int main(int argc, char **argv) {
     sleep(STARTUP_LATANCY_SEC);
 
     while (1) {
-        switch (node_self->status) {
-        case leader:
-            /* code */
-            leader_func(sock);
+        tmp_addrlen = sizeof(struct sockaddr_in);
+        res = recvfrom(sock, &packet_buf, sizeof(packet_buf), 0,
+                       (struct sockaddr *)tmp_addr, &tmp_addrlen);
+        if (res < 0) {
+            perror("recvfrom() failed");
+            goto exit;
+        }
+        switch (packet_buf->RPC_type) {
+
+        case RPC_AppendEntries:
+            Arg_AppendEntries arg_buffer;
+            while (pt_node) {
+                if (pt_node->id == self_id) {
+                    pt_node = pt_node->next;
+                    continue;
+                }
+                tmp_addr = &(pt_node->serv_addr);
+                tmp_addrlen = sizeof(struct sockaddr);
+
+                /*arg_bufferの初期化*/
+                memset(&arg_buffer, 0, sizeof(arg_buffer));
+                // print_sockaddr_in(peer_addr, "peer_addr");
+                arg_buffer.term = currentTerm;
+                arg_buffer.leaderId = leaderID;
+                arg_buffer.prevLogIndex = pt_node->matchIndex;
+                arg_buffer.prevLogTerm = entries[arg_buffer.prevLogIndex].term;
+                arg_buffer.entries_len = 1; // とりあえず1件
+                arg_buffer.entries = malloc(sizeof(arg_buffer.entries) * arg_buffer.entries_len);
+                strcpy(arg_buffer.entries[0].log_command, LOG_MESSAGE);
+                arg_buffer.leaderCommit = commitIndex;
+
+                if (sendto(sock, &arg_buffer, sizeof(arg_buffer), 0,
+                           (struct sockaddr *)tmp_addr, tmp_addrlen) < 0) {
+                    perror("sendto() failed");
+                    exit(EXIT_FAILURE);
+                }
+                pt_node = pt_node->next;
+            }
+
             break;
-        case follower:
+        case RES_AppendEntries:
+            pt_node->nm = alive;
+            if (res_buffer.success == SUCCESS) {
+                pt_node->agreed = agreed;
+                num_agreed++;
+                printf("Agreed:%d", num_agreed);
+
+                pt_node->nextIndex++;
+                pt_node->matchIndex++;
+            }
+            break;
+        case RPC_RequestVote:
             follower_func(sock);
             break;
 
         default:
             break;
         }
+
+        switch (node_self->status) {
+        case leader:
+            /* code */
+            break;
+        case follower:
+            break;
+        default:
+            break;
+        }
     }
-    /*****************************************************************************/
+/*****************************************************************************/
+exit:
+    cleanup_nodeinfo();
 }
