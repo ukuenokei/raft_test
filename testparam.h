@@ -4,8 +4,8 @@
 #define PORT 1000
 
 #define LEADER_ID 0
-
-#define LOG_MESSAGE "Log message [%d]"
+#define LOG_MESSAGE "LOG_MESSAGE"
+#define STARTUP_LATANCY_SEC 3
 
 void print_sockaddr_in(const struct sockaddr_in *addr, const char *label) {
     char ip_str[INET_ADDRSTRLEN];

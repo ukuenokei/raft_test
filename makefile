@@ -1,5 +1,5 @@
-TARGET	= main leader follower
-SRCS 	= leader.c follower.c
+TARGET	= main
+SRCS 	= main #leader.c follower.c
 OBJS 	= $(SRCS:.c=.o)
 CC  	= gcc
 CFLAGS	= -g
