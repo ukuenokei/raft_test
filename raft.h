@@ -33,7 +33,7 @@ typedef struct _Index {
 
 typedef struct _Leader_Info {
     unsigned int majority_agreed; /*T/F*/
-    unsigned int num_agreed;
+    unsigned int num_agreed[MAX_NUM_ENTRIES];
     unsigned int majority;
 } Leader_Info;
 
@@ -44,6 +44,7 @@ typedef struct _Node_Info {
     enum Agreed agreed;
     enum NodeMap nm;
     // Volatile state on leader: (選挙後に再初期化)
+
     // 各サーバに対して、そのサーバに送信する次のログエントリのインデックス
     // (リーダーの最後のログインデックス + 1 に初期化)。
     unsigned int nextIndex;
@@ -59,12 +60,19 @@ typedef struct _Log_Entry {
 } Log_Entry;
 
 typedef struct {
+    // リーダーのターム。
     unsigned int term;
+    // フォロワーがクライアントをリダイレクトできるようにするため。
     unsigned int leaderId;
+    // 新しいエントリの直前のログエントリのインデックス。
     unsigned int prevLogIndex;
+    // prevLogIndex のターム。
     unsigned int prevLogTerm;
-    Log_Entry entries; // FIXME:効率のため複数送信できるようにする
+    // 保存するログエントリ (ハートビートの場合は空; FIXME:効率のため複数を送信することが可能)。
+    Log_Entry entries;
+    // 送られたエントリの長さ(nextがNULLになるまで回せば良いから後で消せる)
     unsigned int entries_len;
+    // リーダーの commitIndex。
     unsigned int leaderCommit;
 } Arg_AppendEntries;
 
@@ -81,7 +89,7 @@ typedef struct {
         Res_AppendEntries res_appendentries;
         // struct _REQUEST_VOTE_REQ	request_req;
         // struct _REQUEST_VOTE_RES	request_res;
-        // 後で追加
+        // クライアントリクエスト
     };
 } Raft_Packet;
 

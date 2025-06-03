@@ -13,9 +13,13 @@
 #include "testparam.h"
 
 #define RETRY_MAX 3
-#define INTERVAL 3
+// #define INTERVAL 3
 #define RECVTIMEOUT_SEC 1
 #define RECVTIMEOUT_USEC 0
+#define ELECTIONTOMIN_MSEC 150
+#define ELECTIONTOMAX_MSEC 300
+#define HBINTERVAL_SEC 1
+#define HBINTERVAL_USEC 0
 
 #define MAX_FILENAME_LEN 64
 
@@ -26,15 +30,29 @@ unsigned int self_id;
 unsigned int leaderId;
 
 // Persistent state on all services: (RPC に応答する前に安定記憶装置を更新する)
+
+// サーバから見えている最新のターム
+//(初回起動時に 0 に初期化され単調増加する)。
 unsigned int currentTerm;
+// 現在投票している候補者ID。
 unsigned int votedFor;
+// ログエントリ; 各エントリにはステートマシンのコマンドおよびリーダーによってエントリが受信されたタームが含まれている
+//(最初のインデックスは 1)。
 Log_Entry log_entries[LOG_INDEX_MAX]; // 一旦配列にしておく、あとで連結リスト化しないと、、、
+// 積まれたログの長さ
+unsigned int lastLogIndex;
 
 // Volatile state on all servers:
+
+// 過半数にコミットしたことが分かっているログエントリの最大インデックス
+//(0に初期化され単調増加)。
 unsigned int commitIndex;
+// 各々がステートマシンに適用されたログエントリの最大インデックス
+//(0 に初期化され単調増加)。
 unsigned int lastApplied;
 
 // Volatile state on leader: (選挙後に再初期化)
+
 // 各サーバに対して、そのサーバに送信する次のログエントリのインデックス
 // (リーダーの最後のログインデックス + 1 に初期化)。 Index *nextIndex;
 // 各サーバに対して、そのサーバで複製されていることが分かっている最も大きいログエントリのインデックス
@@ -87,16 +105,6 @@ void cleanup_nodeinfo(void) {
     node_leader = NULL;
 }
 
-int init_log_info() {
-    Node_Info *pt_node;
-    pt_node = node_head;
-    while (pt_node) {
-        pt_node->nextIndex = lastApplied + 1;
-        pt_node->matchIndex = 0;
-        pt_node = pt_node->next;
-    }
-}
-
 Node_Info *get_node(unsigned int id) {
     Node_Info *current = node_head;
     while (current != NULL) {
@@ -108,48 +116,118 @@ Node_Info *get_node(unsigned int id) {
     return NULL;
 }
 
-int check_timeout(struct timespec *timer, double timeout_sec) {
+int init_leader(Leader_Info *leader_info, unsigned int newleaderId) {
+    Node_Info *pt_node;
+    leaderId = newleaderId;
+    node_leader = get_node(leaderId);
+    node_leader->status = LEADER;
+    if (self_id == leaderId) {
+        // 実装がいまいち、、、
+        memset(leader_info->num_agreed, 0, MAX_NUM_ENTRIES);
+        leader_info->majority = num_node / 2 + 1;
+        // Volatile state on leader: (選挙後に再初期化)
+        pt_node = node_head;
+        while (pt_node) {
+            pt_node->nextIndex = lastLogIndex + 1;
+            pt_node->matchIndex = 0;
+            pt_node = pt_node->next;
+        }
+    };
+    return 0;
+}
+
+int check_timeout(struct timespec std, struct timespec timeout) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
 
-    double elapsed = (now.tv_sec - timer->tv_sec) + (now.tv_nsec - timer->tv_nsec) / 1e9;
+    time_t sec_diff = now.tv_sec - std.tv_sec;
+    long nsec_diff = now.tv_nsec - std.tv_nsec;
 
-    return (elapsed >= timeout_sec) ? 1 : 0;
+    if (nsec_diff < 0) {
+        sec_diff -= 1;
+        nsec_diff += 1000000000L;
+    }
+
+    if (sec_diff > timeout.tv_sec ||
+        (sec_diff == timeout.tv_sec && nsec_diff >= timeout.tv_nsec)) {
+        return 1; // timeout
+    }
+
+    return 0; // not yet
 }
 
 void reset_timer(struct timespec *timer) {
     clock_gettime(CLOCK_MONOTONIC, timer);
 }
 
-void mklog_message(const char *log_message, unsigned int index) {
-    char buffer[MAX_COMMAND_LEN];
-    memset(buffer, 0, sizeof(buffer));
-    snprintf(buffer, sizeof(buffer), "%s (Index : [%u] Term : [%u])", log_message, index, currentTerm);
-
-    log_entries[index].term = currentTerm;
-
-    strncpy(log_entries[index].log_command, buffer, MAX_COMMAND_LEN - 1);
-    // log_entries[index].log_command[MAX_COMMAND_LEN - 1] = '\0';
+void randomize_electionto(struct timespec *elto) {
+    srand((unsigned int)time(NULL));
+    int elto_ms = ELECTIONTOMIN_MSEC + (rand() % (ELECTIONTOMAX_MSEC - ELECTIONTOMIN_MSEC + 1));
+    elto->tv_sec = elto_ms / 1000;
+    elto->tv_nsec = (elto_ms % 1000) * 1e6;
 }
 
-int commit(unsigned int index, unsigned int id) {
+// 積まれたログをステートマシンに適用する
+int apply_log() {
     FILE *fp;
     char filename[MAX_FILENAME_LEN];
     char buf[MAX_COMMAND_LEN];
-    snprintf(filename, sizeof(filename), "Log%d.dat", id);
-    // snprintf(buf, sizeof(buf), "%d\t%d\t%s", log_entries[index].term, log_entries[index].log_command);
+    snprintf(filename, sizeof(filename), "Log%d.dat", node_self->id);
     if (NULL == (fp = fopen(filename, "a"))) {
         perror("Cannot open Log file");
         exit(EXIT_FAILURE);
     }
-    fprintf(fp, "%d\t%d\t%s\n", index, log_entries[index].term, log_entries[index].log_command);
+    lastApplied++;
+    fprintf(fp, "%d\t%d\t%s\n",
+            lastApplied, log_entries[lastApplied].term, log_entries[lastApplied].log_command);
     fclose(fp);
+
+    return 0;
+}
+
+// リーダーは合意を取れたらコミットする(Leader)
+int commit() {
+    apply_log();
     commitIndex++;
+}
+
+// クライアントから来たログを積む(Leader)
+void add_entries(const char *log_message) {
+    char buffer[MAX_COMMAND_LEN];
+    memset(buffer, 0, sizeof(buffer));
+    lastLogIndex++;
+    snprintf(buffer, sizeof(buffer), "%s (Index : [%u] Term : [%u])", log_message, lastLogIndex, currentTerm);
+
+    log_entries[lastLogIndex].term = currentTerm;
+
+    strncpy(log_entries[lastLogIndex].log_command, buffer, MAX_COMMAND_LEN - 1);
+    log_entries[lastLogIndex].log_command[MAX_COMMAND_LEN - 1] = '\0';
+}
+
+int read_log(void) {
+    FILE *fp;
+    char filename[MAX_FILENAME_LEN];
+    int index;
+    Log_Entry buf;
+    snprintf(filename, sizeof(filename), "Log%d.dat", node_self->id);
+    memset(log_entries, 0, MAX_NUM_ENTRIES);
+    if (NULL == (fp = fopen(filename, "a"))) {
+        perror("Cannot open Log file");
+        exit(EXIT_FAILURE);
+    }
+
+    while (fscanf(fp, "%d\t%d\t%s\n", &index, &buf.term, &buf.log_command)) {
+        log_entries[index] = buf;
+    }
+    fclose(fp);
     return 0;
 }
 
 Res_AppendEntries AppendEntries(Arg_AppendEntries *arg_appendentries) {
     Res_AppendEntries res_appendentries;
+
+    currentTerm = arg_appendentries->term;
+    res_appendentries.term = currentTerm;
     res_appendentries.success = SUCCESS;
     // リーダーが認識しているタームが遅れている場合はfalse
     if (arg_appendentries->term < currentTerm) {
@@ -163,6 +241,8 @@ Res_AppendEntries AppendEntries(Arg_AppendEntries *arg_appendentries) {
     }
 
     if (res_appendentries.success == SUCCESS) {
+        // ログを複製
+        lastLogIndex++;
         log_entries[arg_appendentries->prevLogIndex].term = arg_appendentries->term;
         strcpy(log_entries[arg_appendentries->prevLogIndex].log_command,
                arg_appendentries->entries.log_command);
@@ -173,8 +253,7 @@ Res_AppendEntries AppendEntries(Arg_AppendEntries *arg_appendentries) {
             min(arg_appendentries->leaderCommit,
                 arg_appendentries->prevLogIndex + arg_appendentries->entries_len);
     }
-    currentTerm = arg_appendentries->term;
-    res_appendentries.term = currentTerm;
+
     return res_appendentries;
 }
 
@@ -186,7 +265,7 @@ int main(int argc, char **argv) {
     socklen_t tmp_addrlen;
     Node_Info *pt_node;
     Leader_Info *leader_info;
-    struct timespec ts, to_election, to_hb;
+    struct timespec ts, el_to, hb_to;
     struct timeval timeout;
     unsigned int tmpindex;
 
@@ -195,7 +274,6 @@ int main(int argc, char **argv) {
         exit(EXIT_SUCCESS);
     }
 
-    currentTerm = 0;
     num_node = atoi(argv[1]);
     self_id = atoi(argv[2]);
 
@@ -204,38 +282,32 @@ int main(int argc, char **argv) {
     node_tail = NULL;
     node_self = NULL;
     pt_node = NULL;
+    init_nodeinfo();
+
+    currentTerm = 0;
     commitIndex = 0;
     lastApplied = 0;
 
     timeout.tv_sec = RECVTIMEOUT_SEC;
     timeout.tv_usec = RECVTIMEOUT_USEC;
+    hb_to.tv_sec = HBINTERVAL_SEC;
+    hb_to.tv_nsec = HBINTERVAL_USEC;
+    randomize_electionto(&el_to);
+
     memset(log_entries, 0, sizeof(log_entries));
-
-    init_nodeinfo();
-
-    if (self_id == leaderId) {
-        leader_info = (Leader_Info *)malloc(sizeof(Leader_Info));
-        if (leader_info == NULL) {
-            perror("Failed to allocate memory for leader_info");
-            exit(EXIT_FAILURE);
-        }
-        node_self->serv_addr.sin_addr.s_addr = INADDR_ANY;
+    leader_info = (Leader_Info *)malloc(sizeof(Leader_Info));
+    if (leader_info == NULL) {
+        perror("Failed to allocate memory for leader_info");
+        exit(EXIT_FAILURE);
     }
-    pt_node = node_head;
-    while (pt_node) {
-        if (pt_node->id == leaderId) {
-            node_leader = pt_node;
-            node_leader->status = LEADER;
-        }
-        pt_node = pt_node->next;
-    }
+    init_leader(leader_info, LEADER_ID);
 
     if ((sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
         perror("socket() failed");
         exit(EXIT_FAILURE);
     }
-    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) <
-        0) {
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+                   &timeout, sizeof(timeout)) < 0) {
         perror("setsockopt(RCVTIMEO) failed");
         exit(EXIT_FAILURE);
     }
@@ -248,24 +320,26 @@ int main(int argc, char **argv) {
 
     sleep(STARTUP_LATANCY_SEC);
     printf("Program Start\n");
-
     tmpindex = 0;
-    log_entries[tmpindex].term = currentTerm;
-    mklog_message("Program Start", tmpindex);
-    commit(tmpindex, self_id);
+    add_entries("Program Start");
+    apply_log();
     reset_timer(&ts);
 
     while (1) {
         // リーダーの送信処理
         switch (node_self->status) {
         case LEADER:
-            if (!check_timeout(&ts, INTERVAL)) {
+            if (!check_timeout(ts, hb_to)) {
                 continue;
             }
             reset_timer(&ts);
-            leader_info->num_agreed = 1; // 送信前に初期化
+            leader_info->num_agreed[lastLogIndex] = 1; // 送信前に初期化
             pt_node = node_head;
-            mklog_message(LOG_MESSAGE, tmpindex);
+
+            // 自身のログエントリに追加する
+            add_entries(LOG_MESSAGE);
+            // クライアントからのログをコピー
+            // TODO:クライアントからのログを積むようにする処理
             while (pt_node) {
                 if (pt_node->id == self_id) {
                     pt_node = pt_node->next;
@@ -274,21 +348,19 @@ int main(int argc, char **argv) {
 
                 memset(&send_buf, 0, sizeof(send_buf));
                 send_buf.RPC_type = RPC_APPENDENTRIES;
-                // tmpindexはprevIndexを指している
-                tmpindex = pt_node->nextIndex;
+                // サーバに送信する次のログエントリのインデックス
                 send_buf.id = node_self->id;
                 send_buf.arg_appendentries.term = currentTerm;
                 send_buf.arg_appendentries.leaderId = leaderId;
-                send_buf.arg_appendentries.prevLogIndex = tmpindex - 1;
-                send_buf.arg_appendentries.prevLogTerm = log_entries[tmpindex - 1].term;
-                // クライアントからのログをコピー(今はログメッセージの複製)
+                send_buf.arg_appendentries.prevLogIndex = pt_node->nextIndex - 1;
+                send_buf.arg_appendentries.prevLogTerm = log_entries[pt_node->nextIndex - 1].term;
                 // TODO:複数のログを送信できるように変える
-                send_buf.arg_appendentries.entries = log_entries[tmpindex];
+                // TODO:論理時計の送信
+                send_buf.arg_appendentries.entries = log_entries[pt_node->nextIndex];
                 send_buf.arg_appendentries.entries_len = 1;
                 send_buf.arg_appendentries.leaderCommit = commitIndex;
 
-                printf("Send HB to [%d]\n", pt_node->id);
-                // print_sockaddr_in(tmp_addr, "peer_addr");
+                printf("Send AppendEntriesRPC to Node[%d] (Index : [%d])\n", pt_node->id, pt_node->nextIndex);
                 tmp_addr = &(pt_node->serv_addr);
                 tmp_addrlen = sizeof(struct sockaddr_in);
                 if (sendto(sock, &send_buf, sizeof(send_buf), 0,
@@ -325,13 +397,14 @@ int main(int argc, char **argv) {
             if (node_self->status != FOLLOWER) {
                 continue;
             }
-            printf("HB receved\n");
+            printf("HB Receved\n");
 
             node_leader->status = ALIVE;
+            // AppendEntriesを開始する
             send_buf.RPC_type = RES_APPENDENTRIES;
             send_buf.id = node_self->id;
             send_buf.res_appendentries = AppendEntries(&recv_buf.arg_appendentries);
-            // AppendEntriesを開始する
+
             tmp_addr = &(node_leader->serv_addr);
             tmp_addrlen = sizeof(struct sockaddr_in);
             if (sendto(sock, &send_buf, sizeof(send_buf), 0,
@@ -346,25 +419,27 @@ int main(int argc, char **argv) {
                 continue;
             }
             Res_AppendEntries res_buffer = recv_buf.res_appendentries;
-            printf("HB receved [%d]\t[%d]\t", pt_node->id, res_buffer.success);
+            printf("Recv AppendEntriesRes from Node[%d] (Index : [%d])\t", pt_node->id, pt_node->nextIndex);
             pt_node->nm = ALIVE;
             if (res_buffer.success == SUCCESS) {
                 pt_node->agreed = AGREED;
-                leader_info->num_agreed++;
-                printf("Agreed:%d", leader_info->num_agreed);
-
+                // nextIndexにはさっき各ノードに送ったインデックスが入っている
+                leader_info->num_agreed[pt_node->nextIndex]++;
+                printf("Node[%d] Agreed about Commiting Log [%d]\n",
+                       pt_node->id, pt_node->nextIndex, leader_info->num_agreed[pt_node->nextIndex]);
+                if (leader_info->num_agreed[pt_node->nextIndex] >= leader_info->majority) {
+                    printf("Majority Agreed about Commiting Log (Index : [%d] Number of Agreed: [%d])\n",
+                           pt_node->nextIndex, leader_info->num_agreed[pt_node->nextIndex]);
+                    commit();
+                }
                 pt_node->nextIndex++;
                 pt_node->matchIndex++;
             } else if (res_buffer.success == FAILURE) {
+                pt_node->agreed = DISAGREED;
                 pt_node->nextIndex--;
             } else {
                 perror("Error");
                 goto exit;
-            }
-            printf("\n");
-            if (leader_info->num_agreed >= leader_info->majority) {
-                printf("Majority Agreed");
-                commit(lastApplied + 1, self_id);
             }
             break;
         case RPC_REQUESTVOTE:
