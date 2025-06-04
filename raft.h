@@ -2,7 +2,7 @@
 
 #define LOG_INDEX_MAX 100
 #define MAX_COMMAND_LEN 128
-#define MAX_NUM_ENTRIES 3
+// #define MAX_NUM_ENTRIES 3
 
 #define SUCCESS 0
 #define FAILURE 1
@@ -33,7 +33,7 @@ typedef struct _Index {
 
 typedef struct _Leader_Info {
     unsigned int majority_agreed; /*T/F*/
-    unsigned int num_agreed[MAX_NUM_ENTRIES];
+    unsigned int num_agreed[LOG_INDEX_MAX];
     unsigned int majority;
 } Leader_Info;
 
