@@ -91,10 +91,22 @@ typedef struct {
     //  候補者の最後のログエントリのターム
     unsigned int lastLogTerm;
 } Arg_RequestVote;
+
 typedef struct {
     unsigned int term;
     bool voteGranted;
 } Res_RequestVote;
+
+// クライアントリクエスト
+typedef struct {
+    char log_command[MAX_COMMAND_LEN]
+} ClientRequest;
+
+typedef struct {
+    unsigned int leaderId; // クライアントリクエストを受け取ったリーダーのID
+    unsigned int id;       // クライアントリクエストのID
+    bool sucess;
+} Res_ClientRequest;
 
 typedef struct {
     enum RPC_Type RPC_type;
@@ -102,8 +114,8 @@ typedef struct {
     union {
         Arg_AppendEntries arg_appendentries;
         Res_AppendEntries res_appendentries;
-        // struct _REQUEST_VOTE_REQ	request_req;
-        // struct _REQUEST_VOTE_RES	request_res;
-        // クライアントリクエスト
+        Arg_RequestVote arg_requestvote;
+        Res_RequestVote res_requestvote;
+        ClientRequest client_request;
     };
 } Raft_Packet;

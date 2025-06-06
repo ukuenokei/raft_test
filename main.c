@@ -40,7 +40,8 @@ unsigned int currentTerm;
 unsigned int votedFor;
 // ログエントリ; 各エントリにはステートマシンのコマンドおよびリーダーによってエントリが受信されたタームが含まれている
 //(最初のインデックスは 1)
-Log_Entry logEntries[LOG_INDEX_MAX]; // 一旦配列にしておく、あとで連結リスト化しないと、、、
+Log_Entry logEntries[LOG_INDEX_MAX];
+
 // 積まれたログの長さ
 unsigned int lastLogIndex;
 
@@ -229,12 +230,10 @@ int read_logentires() {
 // クライアントから来たログを積む(仮)(Leader)
 void add_logentries(const char *log_message) {
     char buffer[MAX_COMMAND_LEN];
+    lastLogIndex++;
     memset(buffer, 0, sizeof(buffer));
     snprintf(buffer, sizeof(buffer), "%s (Index : [%u] Term : [%u])", log_message, lastLogIndex, currentTerm);
-
-    lastLogIndex++;
     logEntries[lastLogIndex].term = currentTerm;
-
     strncpy(logEntries[lastLogIndex].log_command, buffer, MAX_COMMAND_LEN - 1);
     logEntries[lastLogIndex].log_command[MAX_COMMAND_LEN - 1] = '\0';
 }
@@ -263,6 +262,7 @@ int apply_logentries() {
 Res_AppendEntries AppendEntries(Arg_AppendEntries *arg_appendentries) {
     Res_AppendEntries res_appendentries;
     Log_Entry *buf;
+    unsigned int tmpindex;
 
     currentTerm = arg_appendentries->term;
     res_appendentries.term = currentTerm;
@@ -273,30 +273,34 @@ Res_AppendEntries AppendEntries(Arg_AppendEntries *arg_appendentries) {
         return res_appendentries;
     }
     // 直前のログのインデックスとタームが同一でない場合は、ログが一貫していないのでfalse
-    if (logEntries[arg_appendentries->prevLogIndex].term !=
-            arg_appendentries->prevLogTerm ||
+    if (logEntries[arg_appendentries->prevLogIndex].term != arg_appendentries->prevLogTerm ||
         lastLogIndex < arg_appendentries->prevLogIndex) {
         res_appendentries.success = false;
         return res_appendentries;
     }
 
-    // 既存のエントリが新しいエントリと競合する場合 (同じインデックスだが異なるターム)、既存のエントリとそれに続くものをすべて削除
-    for (int i = 0; i < arg_appendentries->entries_len; i++) {
-        if (lastLogIndex < arg_appendentries->prevLogIndex + i &&
-            logEntries[arg_appendentries->prevLogIndex + i].term != arg_appendentries->term) {
-            buf = (Log_Entry *)malloc(sizeof(Log_Entry));
-            memset(buf, 0, sizeof(Log_Entry));
-            // TODO:削除してない(インデックスを変えて誤魔化している)のでちゃんと消す処理を書く
-            logEntries[arg_appendentries->prevLogIndex + i] = *buf;
-            lastLogIndex = arg_appendentries->prevLogIndex + i - 1;
-            free(buf);
-        }
-    }
     //  ログを複製
     for (int i = 0; i < arg_appendentries->entries_len; i++) {
+        tmpindex = arg_appendentries->prevLogIndex + 1 + i;
+        // 既存のエントリが新しいエントリと競合する場合 (同じインデックスだが異なるターム)
+        if (lastLogIndex >= tmpindex &&
+            logEntries[tmpindex].term != arg_appendentries->entries[i].term) {
+            // 既存のエントリとそれに続くものをすべて削除
+            buf = (Log_Entry *)malloc(sizeof(Log_Entry));
+            memset(buf, 0, sizeof(Log_Entry));
+            for (int j = tmpindex; j <= lastLogIndex; j++) {
+                // TODO:削除してない(0埋めしてるだけ)
+                logEntries[j] = *buf;
+            }
+            free(buf);
+            lastLogIndex = tmpindex - 1;
+            res_appendentries.success = false;
+            printf("Log[%d] Term Mismatch\n", tmpindex);
+            return res_appendentries;
+        }
         lastLogIndex++;
-        logEntries[arg_appendentries->prevLogIndex + i].term = arg_appendentries->term;
-        strcpy(logEntries[arg_appendentries->prevLogIndex + i].log_command,
+        logEntries[tmpindex].term = arg_appendentries->term;
+        strcpy(logEntries[tmpindex].log_command,
                arg_appendentries->entries[i].log_command);
     }
 
@@ -307,20 +311,22 @@ Res_AppendEntries AppendEntries(Arg_AppendEntries *arg_appendentries) {
     return res_appendentries;
 }
 
-Res_RequestVote RequestVote(Arg_RequestVote *arg_requestvote) {
+Res_RequestVote Vote(Arg_RequestVote *arg_requestvote) {
     Res_RequestVote res_requestvote;
     res_requestvote.term = currentTerm;
     res_requestvote.voteGranted = true;
-
+    // 候補者のタームが現在のタームよりも古い場合は投票しない
     if (arg_requestvote->term < currentTerm) {
         res_requestvote.voteGranted = false;
         return res_requestvote;
     }
-    if (votedFor != VOTEDFOR_NULL && votedFor != arg_requestvote->candidateId && (lastLogIndex > arg_requestvote->lastLogIndex || logEntries[lastLogIndex].term > arg_requestvote->lastLogTerm)) {
-        res_requestvote.voteGranted = false;
-        return res_requestvote;
+    // もし votedFor が null または candidateId であり、候補者のログが少なくとも受信者のログと同じように最新のものである場合、投票が許可される
+    if (votedFor != VOTEDFOR_NULL && votedFor != arg_requestvote->candidateId) {
+        if (lastLogIndex > arg_requestvote->lastLogIndex || logEntries[lastLogIndex].term > arg_requestvote->lastLogTerm) {
+            res_requestvote.voteGranted = false;
+            return res_requestvote;
+        }
     }
-
     return res_requestvote;
 }
 
@@ -408,6 +414,7 @@ int main(int argc, char **argv) {
             break;
 
         case LEADER:
+            // リーダーは定期的にハートビートを送信する
             if (!check_timeout(hb_std, hb_to)) {
                 break;
             }
@@ -544,6 +551,8 @@ int main(int argc, char **argv) {
     }
 /*****************************************************************************/
 exit:
+    if (leader_info)
+        free(leader_info);
     cleanup_nodeinfo();
     close(sock);
 }
