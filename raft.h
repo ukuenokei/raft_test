@@ -93,7 +93,7 @@ typedef struct {
     };
 } Raft_Packet;
 
-// typedef struct {
-//     unsigned int term;
-//     unsigned int success;
-// } Res_RequestVote;
+typedef struct {
+    unsigned int term;
+    unsigned int success;
+} Res_RequestVote;

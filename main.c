@@ -15,8 +15,8 @@
 #define RETRY_MAX 3
 #define RECVTIMEOUT_SEC 1
 #define RECVTIMEOUT_USEC 0
-#define ELECTIONTOMIN_MSEC 150
-#define ELECTIONTOMAX_MSEC 300
+#define ELECTIONTOMIN_MSEC 1500
+#define ELECTIONTOMAX_MSEC 3000
 #define HBINTERVAL_SEC 2
 #define HBINTERVAL_USEC 0
 
@@ -165,10 +165,10 @@ void reset_timer(struct timespec *timer) {
 }
 
 void randomize_electionto(struct timespec *elto) {
-    srand((unsigned int)time(NULL));
+
     int elto_ms = ELECTIONTOMIN_MSEC + (rand() % (ELECTIONTOMAX_MSEC - ELECTIONTOMIN_MSEC + 1));
     elto->tv_sec = elto_ms / 1000;
-    elto->tv_nsec = (elto_ms % 1000) * 1e6;
+    elto->tv_nsec = (elto_ms % 1000) * 1000000L;
 }
 
 int dump_term() {
@@ -252,7 +252,9 @@ int apply_logentries() {
         lastApplied++;
         fprintf(fp, "%d\t%d\t%s\n",
                 lastApplied, logEntries[lastApplied].term, logEntries[lastApplied].log_command);
+        printf("Log[%d] Applied\n", lastApplied);
     }
+
     fclose(fp);
 
     return 0;
@@ -296,7 +298,7 @@ int main(int argc, char **argv) {
     int sock;
     int res;
     Raft_Packet recv_buf, send_buf;
-    struct sockaddr_in *tmp_addr;
+    struct sockaddr_in tmp_addr;
     socklen_t tmp_addrlen;
     Node_Info *pt_node;
     Leader_Info *leader_info;
@@ -308,7 +310,6 @@ int main(int argc, char **argv) {
         printf("Usage: %s <total node number> <my node id>\n", argv[0]);
         exit(EXIT_SUCCESS);
     }
-
     num_node = atoi(argv[1]);
     self_id = atoi(argv[2]);
 
@@ -328,6 +329,7 @@ int main(int argc, char **argv) {
     timeout.tv_usec = RECVTIMEOUT_USEC;
     hb_to.tv_sec = HBINTERVAL_SEC;
     hb_to.tv_nsec = HBINTERVAL_USEC;
+    srand(time(NULL) + self_id);
     randomize_electionto(&el_to);
 
     memset(logEntries, 0, sizeof(logEntries));
@@ -349,9 +351,9 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    tmp_addr = &node_self->serv_addr;
-    print_sockaddr_in(tmp_addr, "self_addr");
-    if (bind(sock, (struct sockaddr *)tmp_addr, sizeof(*tmp_addr))) {
+    tmp_addr = node_self->serv_addr;
+    print_sockaddr_in(&tmp_addr, "self_addr");
+    if (bind(sock, (struct sockaddr *)&tmp_addr, sizeof(struct sockaddr))) {
         perror("bind() failed");
         exit(EXIT_FAILURE);
     }
@@ -366,6 +368,14 @@ int main(int argc, char **argv) {
         apply_logentries();
         // リーダーの送信処理
         switch (node_self->status) {
+        case FOLLOWER:
+            if (!check_timeout(el_std, el_to)) {
+                break;
+            }
+            printf("HBTO\n");
+            reset_timer(&el_std);
+
+            break;
         case LEADER:
             if (!check_timeout(hb_std, hb_to)) {
                 break;
@@ -392,17 +402,16 @@ int main(int argc, char **argv) {
                 send_buf.arg_appendentries.prevLogIndex = pt_node->nextIndex - 1;
                 send_buf.arg_appendentries.prevLogTerm = logEntries[pt_node->nextIndex - 1].term;
                 // TODO:複数のログを送信できるように変える
-                // TODO:論理時計の送信
                 send_buf.arg_appendentries.entries = logEntries[pt_node->nextIndex];
                 send_buf.arg_appendentries.entries_len = 1;
                 send_buf.arg_appendentries.leaderCommit = commitIndex;
 
                 printf("Send AppendEntriesRPC to Node[%d]\t(Index : [%d])\n",
                        pt_node->id, pt_node->nextIndex);
-                tmp_addr = &(pt_node->serv_addr);
+                tmp_addr = pt_node->serv_addr;
                 tmp_addrlen = sizeof(struct sockaddr_in);
                 if (sendto(sock, &send_buf, sizeof(send_buf), 0,
-                           (struct sockaddr *)tmp_addr, tmp_addrlen) < 0) {
+                           (struct sockaddr *)&tmp_addr, tmp_addrlen) < 0) {
                     perror("sendto() failed");
                     exit(EXIT_FAILURE);
                 }
@@ -410,20 +419,13 @@ int main(int argc, char **argv) {
             }
 
             break;
-        case FOLLOWER:
-            if (!check_timeout(el_std, el_to)) {
-                break;
-            }
-            printf("HBTO\n");
-            reset_timer(&el_std);
-            break;
         default:
             break;
         }
         // 受信処理
         tmp_addrlen = sizeof(struct sockaddr_in);
         if (recvfrom(sock, &recv_buf, sizeof(recv_buf), 0,
-                     (struct sockaddr *)tmp_addr, &tmp_addrlen) < 0) {
+                     (struct sockaddr *)&tmp_addr, &tmp_addrlen) < 0) {
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
                 perror("recvfrom() failed");
             }
@@ -453,12 +455,12 @@ int main(int argc, char **argv) {
             send_buf.id = node_self->id;
             send_buf.res_appendentries = AppendEntries(&recv_buf.arg_appendentries);
 
-            tmp_addr = &(node_leader->serv_addr);
+            tmp_addr = node_leader->serv_addr;
             tmp_addrlen = sizeof(struct sockaddr_in);
             printf("Send AppendEntriesRes to Leader Node[%d]\t(Index : [%d] term : [%d] Success : [%d])\n",
                    leaderId, recv_buf.arg_appendentries.prevLogIndex + 1, send_buf.res_appendentries.term, send_buf.res_appendentries.success);
             if (sendto(sock, &send_buf, sizeof(send_buf), 0,
-                       (struct sockaddr *)tmp_addr, tmp_addrlen) < 0) {
+                       (struct sockaddr *)&tmp_addr, tmp_addrlen) < 0) {
                 perror("sendto() failed");
                 exit(EXIT_FAILURE);
             }
@@ -494,7 +496,7 @@ int main(int argc, char **argv) {
                 pt_node->agreed = DISAGREED;
                 pt_node->nextIndex--;
             } else {
-                perror("Error");
+                perror("Error\n");
                 goto exit;
             }
 
