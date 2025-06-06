@@ -1,11 +1,11 @@
 #include <arpa/inet.h>
+#include <stdbool.h>
 
 #define LOG_INDEX_MAX 100
 #define MAX_COMMAND_LEN 128
-// #define MAX_NUM_ENTRIES 3
+#define MAX_SEND_ENTRIES 3
 
-#define SUCCESS 0
-#define FAILURE 1
+#define VOTEDFOR_NULL -1
 
 int min(int a, int b) { return (a < b) ? a : b; }
 
@@ -69,7 +69,7 @@ typedef struct {
     // prevLogIndex のターム。
     unsigned int prevLogTerm;
     // 保存するログエントリ (ハートビートの場合は空; FIXME:効率のため複数を送信することが可能)。
-    Log_Entry entries;
+    Log_Entry entries[MAX_SEND_ENTRIES];
     // 送られたエントリの長さ(nextがNULLになるまで回せば良いから後で消せる)
     unsigned int entries_len;
     // リーダーの commitIndex。
@@ -78,8 +78,23 @@ typedef struct {
 
 typedef struct {
     unsigned int term;
-    unsigned int success;
+    bool success;
 } Res_AppendEntries;
+
+typedef struct {
+    // 候補者側のターム
+    unsigned int term;
+    // 投票をリクエストしている候補者
+    unsigned int candidateId;
+    // 候補者の最後のログエントリのインデックス
+    unsigned int lastLogIndex;
+    //  候補者の最後のログエントリのターム
+    unsigned int lastLogTerm;
+} Arg_RequestVote;
+typedef struct {
+    unsigned int term;
+    bool voteGranted;
+} Res_RequestVote;
 
 typedef struct {
     enum RPC_Type RPC_type;
@@ -92,8 +107,3 @@ typedef struct {
         // クライアントリクエスト
     };
 } Raft_Packet;
-
-typedef struct {
-    unsigned int term;
-    unsigned int success;
-} Res_RequestVote;

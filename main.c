@@ -262,36 +262,66 @@ int apply_logentries() {
 
 Res_AppendEntries AppendEntries(Arg_AppendEntries *arg_appendentries) {
     Res_AppendEntries res_appendentries;
+    Log_Entry *buf;
 
     currentTerm = arg_appendentries->term;
     res_appendentries.term = currentTerm;
-    res_appendentries.success = SUCCESS;
+    res_appendentries.success = true;
     // リーダーが認識しているタームが遅れている場合はfalse
     if (arg_appendentries->term < currentTerm) {
-        res_appendentries.success = FAILURE;
+        res_appendentries.success = false;
+        return res_appendentries;
     }
     // 直前のログのインデックスとタームが同一でない場合は、ログが一貫していないのでfalse
     if (logEntries[arg_appendentries->prevLogIndex].term !=
             arg_appendentries->prevLogTerm ||
         lastLogIndex < arg_appendentries->prevLogIndex) {
-        res_appendentries.success = FAILURE;
+        res_appendentries.success = false;
+        return res_appendentries;
     }
 
-    if (res_appendentries.success == SUCCESS) {
-        // ログを複製
+    // 既存のエントリが新しいエントリと競合する場合 (同じインデックスだが異なるターム)、既存のエントリとそれに続くものをすべて削除
+    for (int i = 0; i < arg_appendentries->entries_len; i++) {
+        if (lastLogIndex < arg_appendentries->prevLogIndex + i &&
+            logEntries[arg_appendentries->prevLogIndex + i].term != arg_appendentries->term) {
+            buf = (Log_Entry *)malloc(sizeof(Log_Entry));
+            memset(buf, 0, sizeof(Log_Entry));
+            // TODO:削除してない(インデックスを変えて誤魔化している)のでちゃんと消す処理を書く
+            logEntries[arg_appendentries->prevLogIndex + i] = *buf;
+            lastLogIndex = arg_appendentries->prevLogIndex + i - 1;
+            free(buf);
+        }
+    }
+    //  ログを複製
+    for (int i = 0; i < arg_appendentries->entries_len; i++) {
         lastLogIndex++;
-        logEntries[arg_appendentries->prevLogIndex].term = arg_appendentries->term;
-        strcpy(logEntries[arg_appendentries->prevLogIndex].log_command,
-               arg_appendentries->entries.log_command);
+        logEntries[arg_appendentries->prevLogIndex + i].term = arg_appendentries->term;
+        strcpy(logEntries[arg_appendentries->prevLogIndex + i].log_command,
+               arg_appendentries->entries[i].log_command);
     }
 
     if (arg_appendentries->leaderCommit > commitIndex) {
         commitIndex =
-            min(arg_appendentries->leaderCommit,
-                arg_appendentries->prevLogIndex + arg_appendentries->entries_len);
+            min(arg_appendentries->leaderCommit, lastLogIndex);
+    }
+    return res_appendentries;
+}
+
+Res_RequestVote RequestVote(Arg_RequestVote *arg_requestvote) {
+    Res_RequestVote res_requestvote;
+    res_requestvote.term = currentTerm;
+    res_requestvote.voteGranted = true;
+
+    if (arg_requestvote->term < currentTerm) {
+        res_requestvote.voteGranted = false;
+        return res_requestvote;
+    }
+    if (votedFor != VOTEDFOR_NULL && votedFor != arg_requestvote->candidateId && (lastLogIndex > arg_requestvote->lastLogIndex || logEntries[lastLogIndex].term > arg_requestvote->lastLogTerm)) {
+        res_requestvote.voteGranted = false;
+        return res_requestvote;
     }
 
-    return res_appendentries;
+    return res_requestvote;
 }
 
 int main(int argc, char **argv) {
@@ -376,6 +406,7 @@ int main(int argc, char **argv) {
             reset_timer(&el_std);
 
             break;
+
         case LEADER:
             if (!check_timeout(hb_std, hb_to)) {
                 break;
@@ -402,8 +433,10 @@ int main(int argc, char **argv) {
                 send_buf.arg_appendentries.prevLogIndex = pt_node->nextIndex - 1;
                 send_buf.arg_appendentries.prevLogTerm = logEntries[pt_node->nextIndex - 1].term;
                 // TODO:複数のログを送信できるように変える
-                send_buf.arg_appendentries.entries = logEntries[pt_node->nextIndex];
                 send_buf.arg_appendentries.entries_len = 1;
+                for (int i = 0; i < send_buf.arg_appendentries.entries_len; i++) {
+                    send_buf.arg_appendentries.entries[i] = logEntries[pt_node->nextIndex];
+                }
                 send_buf.arg_appendentries.leaderCommit = commitIndex;
 
                 printf("Send AppendEntriesRPC to Node[%d]\t(Index : [%d])\n",
@@ -475,7 +508,7 @@ int main(int argc, char **argv) {
             printf("Recv AppendEntriesRes from Node[%d]\t(Index : [%d] term : [%d] Success : [%d])\n",
                    pt_node->id, pt_node->nextIndex, recv_buf.res_appendentries.term, recv_buf.res_appendentries.success);
             pt_node->nm = ALIVE;
-            if (recv_buf.res_appendentries.success == SUCCESS) {
+            if (recv_buf.res_appendentries.success == true) {
                 pt_node->agreed = AGREED;
                 // nextIndexには各ノードに直近送ったインデックスが入っている
                 leader_info->num_agreed[pt_node->nextIndex]++;
@@ -492,7 +525,7 @@ int main(int argc, char **argv) {
                 printf("\n");
                 pt_node->nextIndex++;
                 pt_node->matchIndex++;
-            } else if (recv_buf.res_appendentries.success == FAILURE) {
+            } else if (recv_buf.res_appendentries.success == false) {
                 pt_node->agreed = DISAGREED;
                 pt_node->nextIndex--;
             } else {
