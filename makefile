@@ -1,5 +1,5 @@
-TARGET	= main
-SRCS 	= main #leader.c follower.c
+TARGET	= main client
+SRCS 	= main.c client.c
 OBJS 	= $(SRCS:.c=.o)
 CC  	= gcc
 CFLAGS	= -g
@@ -12,12 +12,8 @@ all: $(TARGET)
 
 main : main.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LIBDIR)$(LIBS)
-
-leader: leader.c
+client : client.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LIBDIR)$(LIBS)
-
-follower: follower.c
-	$(CC)  $(CFLAGS) -o $@ $^ $(LIBDIR)$(LIBS)
 
 
 clean:

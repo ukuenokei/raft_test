@@ -30,6 +30,7 @@ Node_Info *node_head, *node_tail, *node_self, *node_leader;
 unsigned int num_node;
 unsigned int self_id;
 unsigned int leaderId;
+struct timespec ts, el_to, el_std, hb_to, hb_std;
 
 // Persistent state on all services: (RPC に応答する前に安定記憶装置を更新する)
 
@@ -141,30 +142,6 @@ int init_leader(Leader_Info *leader_info, unsigned int newleaderId) {
     return 0;
 }
 
-int check_timeout(struct timespec std, struct timespec timeout) {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-
-    time_t sec_diff = now.tv_sec - std.tv_sec;
-    long nsec_diff = now.tv_nsec - std.tv_nsec;
-
-    if (nsec_diff < 0) {
-        sec_diff -= 1;
-        nsec_diff += 1000000000L;
-    }
-
-    if (sec_diff > timeout.tv_sec ||
-        (sec_diff == timeout.tv_sec && nsec_diff >= timeout.tv_nsec)) {
-        return 1; // timeout
-    }
-
-    return 0; // not yet
-}
-
-void reset_timer(struct timespec *timer) {
-    clock_gettime(CLOCK_MONOTONIC, timer);
-}
-
 void randomize_electionto(struct timespec *elto) {
 
     int elto_ms = ELECTIONTOMIN_MSEC + (rand() % (ELECTIONTOMAX_MSEC - ELECTIONTOMIN_MSEC + 1));
@@ -195,7 +172,7 @@ int read_term() {
         perror("Cannot open Log file");
         exit(EXIT_FAILURE);
     }
-    fread(&currentTerm, sizeof(logEntries), 1, fp);
+    fread(&currentTerm, sizeof(currentTerm), 1, fp);
     fclose(fp);
     return 0;
 }
@@ -251,7 +228,7 @@ int apply_logentries() {
         lastApplied++;
         fprintf(fp, "%d\t%d\t%s\n",
                 lastApplied, logEntries[lastApplied].term, logEntries[lastApplied].log_command);
-        printf("Log[%d] Applied\n", lastApplied);
+        printf("[Term: %u, LastLogIndex: %u] Log[%d] Applied\n", currentTerm, lastLogIndex, lastApplied);
     }
 
     fclose(fp);
@@ -266,6 +243,8 @@ Res_AppendEntries AppendEntries(Arg_AppendEntries *arg_appendentries) {
 
     currentTerm = arg_appendentries->term;
     res_appendentries.term = currentTerm;
+    res_appendentries.prevLogIndex = arg_appendentries->prevLogIndex;
+    res_appendentries.entries_len = arg_appendentries->entries_len;
     res_appendentries.success = true;
     // リーダーが認識しているタームが遅れている場合はfalse
     if (arg_appendentries->term < currentTerm) {
@@ -284,12 +263,11 @@ Res_AppendEntries AppendEntries(Arg_AppendEntries *arg_appendentries) {
         tmpindex = arg_appendentries->prevLogIndex + 1 + i;
         // 既存のエントリが新しいエントリと競合する場合 (同じインデックスだが異なるターム)
         if (lastLogIndex >= tmpindex &&
-            logEntries[tmpindex].term != arg_appendentries->entries[i].term) {
-            // 既存のエントリとそれに続くものをすべて削除
+            logEntries[tmpindex].term != arg_appendentries->entries.term) {
+            // 既存のエントリとそれに続くものをすべて削除 (0埋めしてるだけ)
             buf = (Log_Entry *)malloc(sizeof(Log_Entry));
             memset(buf, 0, sizeof(Log_Entry));
             for (int j = tmpindex; j <= lastLogIndex; j++) {
-                // TODO:削除してない(0埋めしてるだけ)
                 logEntries[j] = *buf;
             }
             free(buf);
@@ -301,14 +279,45 @@ Res_AppendEntries AppendEntries(Arg_AppendEntries *arg_appendentries) {
         lastLogIndex++;
         logEntries[tmpindex].term = arg_appendentries->term;
         strcpy(logEntries[tmpindex].log_command,
-               arg_appendentries->entries[i].log_command);
+               arg_appendentries->entries.log_command);
     }
-
+    // 自身のコミットインデックスを修正
     if (arg_appendentries->leaderCommit > commitIndex) {
         commitIndex =
             min(arg_appendentries->leaderCommit, lastLogIndex);
     }
     return res_appendentries;
+}
+
+int AppendEntriesRPC(int sock, Node_Info *pt_node, Raft_Packet send_buf, unsigned int entries_len) {
+    struct sockaddr_in tmp_addr;
+    socklen_t tmp_addrlen;
+
+    memset(&send_buf, 0, sizeof(send_buf));
+    send_buf.packet_type = RPC_APPENDENTRIES;
+    send_buf.id = node_self->id;
+    send_buf.arg_appendentries.term = currentTerm;
+    send_buf.arg_appendentries.leaderId = leaderId;
+    send_buf.arg_appendentries.prevLogIndex = pt_node->nextIndex - 1;
+    send_buf.arg_appendentries.prevLogTerm = logEntries[pt_node->nextIndex - 1].term;
+    send_buf.arg_appendentries.entries_len = entries_len;
+    // for (int i = 0; i < entries_len; i++) {
+    //     send_buf.arg_appendentries.entries[i] = logEntries[pt_node->nextIndex + i];
+    // }
+    send_buf.arg_appendentries.entries = logEntries[pt_node->nextIndex];
+    send_buf.arg_appendentries.leaderCommit = commitIndex;
+
+    printf("[Term: %u, LastLogIndex: %u] Send AppendEntriesRPC to Node[%d]\t(prevLogIndex : [%d], entries_len: %d)\n",
+           currentTerm, lastLogIndex, pt_node->id, pt_node->nextIndex - 1, entries_len);
+
+    tmp_addr = pt_node->serv_addr;
+    tmp_addrlen = sizeof(struct sockaddr_in);
+    if (sendto(sock, &send_buf, sizeof(send_buf), 0,
+               (struct sockaddr *)&tmp_addr, tmp_addrlen) < 0) {
+        perror("sendto() failed");
+        exit(EXIT_FAILURE);
+    }
+    return 0;
 }
 
 Res_RequestVote Vote(Arg_RequestVote *arg_requestvote) {
@@ -338,9 +347,9 @@ int main(int argc, char **argv) {
     socklen_t tmp_addrlen;
     Node_Info *pt_node;
     Leader_Info *leader_info;
-    struct timespec ts, el_to, el_std, hb_to, hb_std;
+
     struct timeval timeout;
-    unsigned int tmpindex;
+    unsigned int tmpindex, entries_len;
 
     if (argc != 3) {
         printf("Usage: %s <total node number> <my node id>\n", argv[0]);
@@ -365,6 +374,7 @@ int main(int argc, char **argv) {
     timeout.tv_usec = RECVTIMEOUT_USEC;
     hb_to.tv_sec = HBINTERVAL_SEC;
     hb_to.tv_nsec = HBINTERVAL_USEC;
+
     srand(time(NULL) + self_id);
     randomize_electionto(&el_to);
 
@@ -408,56 +418,36 @@ int main(int argc, char **argv) {
             if (!check_timeout(el_std, el_to)) {
                 break;
             }
-            printf("HBTO\n");
+            printf("[Term: %u, LastLogIndex: %u] HBTO\n", currentTerm, lastLogIndex);
             reset_timer(&el_std);
 
             break;
 
         case LEADER:
-            // リーダーは定期的にハートビートを送信する
-            if (!check_timeout(hb_std, hb_to)) {
-                break;
-            }
-            reset_timer(&hb_std);
-
-            // 自身のログエントリに追加する
-            add_logentries(LOG_MESSAGE);
-            // クライアントからのログをコピー
-            // TODO:クライアントからのログを積むようにする処理
             pt_node = node_head;
             while (pt_node) {
                 if (pt_node->id == self_id) {
                     pt_node = pt_node->next;
                     continue;
                 }
-
-                memset(&send_buf, 0, sizeof(send_buf));
-                send_buf.RPC_type = RPC_APPENDENTRIES;
-                // サーバに送信する次のログエントリのインデックス
-                send_buf.id = node_self->id;
-                send_buf.arg_appendentries.term = currentTerm;
-                send_buf.arg_appendentries.leaderId = leaderId;
-                send_buf.arg_appendentries.prevLogIndex = pt_node->nextIndex - 1;
-                send_buf.arg_appendentries.prevLogTerm = logEntries[pt_node->nextIndex - 1].term;
-                // TODO:複数のログを送信できるように変える
-                send_buf.arg_appendentries.entries_len = 1;
-                for (int i = 0; i < send_buf.arg_appendentries.entries_len; i++) {
-                    send_buf.arg_appendentries.entries[i] = logEntries[pt_node->nextIndex];
-                }
-                send_buf.arg_appendentries.leaderCommit = commitIndex;
-
-                printf("Send AppendEntriesRPC to Node[%d]\t(Index : [%d])\n",
-                       pt_node->id, pt_node->nextIndex);
-                tmp_addr = pt_node->serv_addr;
-                tmp_addrlen = sizeof(struct sockaddr_in);
-                if (sendto(sock, &send_buf, sizeof(send_buf), 0,
-                           (struct sockaddr *)&tmp_addr, tmp_addrlen) < 0) {
-                    perror("sendto() failed");
-                    exit(EXIT_FAILURE);
+                if (lastLogIndex >= pt_node->nextIndex) {
+                    // 未送信ログがある場合は即送信
+                    // entries_len = lastLogIndex - pt_node->nextIndex + 1;
+                    // if (entries_len > MAX_SEND_ENTRIES) {
+                    //     entries_len = MAX_SEND_ENTRIES;
+                    // }
+                    entries_len = 1;
+                    AppendEntriesRPC(sock, pt_node, send_buf, entries_len);
+                } else if (check_timeout(hb_std, hb_to)) {
+                    // 未送信ログがなく、ハートビートタイムアウトならハートビート送信
+                    entries_len = 0;
+                    AppendEntriesRPC(sock, pt_node, send_buf, entries_len);
                 }
                 pt_node = pt_node->next;
             }
-
+            if (check_timeout(hb_std, hb_to)) {
+                reset_timer(&hb_std);
+            }
             break;
         default:
             break;
@@ -476,14 +466,14 @@ int main(int argc, char **argv) {
             printf("Unknown node id: %d\n", recv_buf.id);
             continue;
         }
-        switch (recv_buf.RPC_type) {
+        switch (recv_buf.packet_type) {
         // フォロワーがリーダーからAppendEntriesRPCを受信した場合
         case RPC_APPENDENTRIES:
             if (node_self->status != FOLLOWER) {
                 continue;
             }
-            printf("Recv AppendEntriesRPC from Leader\t(Index : [%d] term : [%d] )\n",
-                   recv_buf.arg_appendentries.prevLogIndex + 1, recv_buf.arg_appendentries.term);
+            printf("[Term: %u, LastLogIndex: %u] Recv AppendEntriesRPC from Leader\t(prevLogIndex : [%d] entries_len : [%d] term : [%d] )\n",
+                   currentTerm, lastLogIndex, recv_buf.arg_appendentries.prevLogIndex, recv_buf.arg_appendentries.entries_len, recv_buf.arg_appendentries.term);
             node_leader->status = ALIVE;
 
             // 安定記憶装置の更新
@@ -491,14 +481,14 @@ int main(int argc, char **argv) {
             dump_term();
 
             // AppendEntriesを開始する
-            send_buf.RPC_type = RES_APPENDENTRIES;
+            send_buf.packet_type = RES_APPENDENTRIES;
             send_buf.id = node_self->id;
             send_buf.res_appendentries = AppendEntries(&recv_buf.arg_appendentries);
 
             tmp_addr = node_leader->serv_addr;
             tmp_addrlen = sizeof(struct sockaddr_in);
-            printf("Send AppendEntriesRes to Leader Node[%d]\t(Index : [%d] term : [%d] Success : [%d])\n",
-                   leaderId, recv_buf.arg_appendentries.prevLogIndex + 1, send_buf.res_appendentries.term, send_buf.res_appendentries.success);
+            printf("[Term: %u, LastLogIndex: %u] Send AppendEntriesRes to Leader Node[%d]\t(prevLogIndex : [%d] term : [%d] Success : [%d])\n",
+                   currentTerm, lastLogIndex, leaderId, recv_buf.arg_appendentries.prevLogIndex, send_buf.res_appendentries.term, send_buf.res_appendentries.success);
             if (sendto(sock, &send_buf, sizeof(send_buf), 0,
                        (struct sockaddr *)&tmp_addr, tmp_addrlen) < 0) {
                 perror("sendto() failed");
@@ -512,29 +502,32 @@ int main(int argc, char **argv) {
             }
             recv_buf.res_appendentries;
 
-            printf("Recv AppendEntriesRes from Node[%d]\t(Index : [%d] term : [%d] Success : [%d])\n",
-                   pt_node->id, pt_node->nextIndex, recv_buf.res_appendentries.term, recv_buf.res_appendentries.success);
+            printf("[Term: %u, LastLogIndex: %u] Recv AppendEntriesRes from Node[%d]\t(prevLogIndex : [%d] entries_len : [%d] term : [%d] Success : [%d])\n",
+                   currentTerm, lastLogIndex, pt_node->id, recv_buf.res_appendentries.prevLogIndex, recv_buf.res_appendentries.entries_len,
+                   recv_buf.res_appendentries.term, recv_buf.res_appendentries.success);
             pt_node->nm = ALIVE;
             if (recv_buf.res_appendentries.success == true) {
-                pt_node->agreed = AGREED;
-                // nextIndexには各ノードに直近送ったインデックスが入っている
-                leader_info->num_agreed[pt_node->nextIndex]++;
-                printf("Node[%d] Agreed about Log[%d]",
-                       pt_node->id, pt_node->nextIndex, leader_info->num_agreed[pt_node->nextIndex]);
-                if (leader_info->num_agreed[pt_node->nextIndex] >= leader_info->majority) {
-                    printf("\tMajority Agreed\t(Index : [%d] Number of Agreed: [%d])",
-                           pt_node->nextIndex, leader_info->num_agreed[pt_node->nextIndex]);
-                    if (commitIndex < pt_node->nextIndex) {
-                        commitIndex++;
-                        printf("\tCommit\t(Index : [%d])", commitIndex);
+                // フォロワーにログを積んだ場合
+                if (recv_buf.res_appendentries.entries_len != 0) {
+                    // nextIndexには各ノードに直近送ったインデックスが入っている
+                    leader_info->num_agreed[pt_node->nextIndex]++;
+                    printf("[Term: %u, LastLogIndex: %u] Node[%d] Agreed about Log[%d]",
+                           currentTerm, lastLogIndex, pt_node->id, pt_node->nextIndex, leader_info->num_agreed[pt_node->nextIndex]);
+                    if (leader_info->num_agreed[pt_node->nextIndex] >= leader_info->majority) {
+                        printf("\tMajority Agreed\t(Index : [%d] Number of Agreed: [%d])",
+                               pt_node->nextIndex, leader_info->num_agreed[pt_node->nextIndex]);
+                        if (commitIndex < pt_node->nextIndex) {
+                            commitIndex++;
+                            printf("\tCommit\t(Index : [%d])", commitIndex);
+                        }
                     }
+                    printf("\n");
+                    pt_node->nextIndex += recv_buf.res_appendentries.entries_len;
+                    pt_node->matchIndex += recv_buf.res_appendentries.entries_len;
                 }
-                printf("\n");
-                pt_node->nextIndex++;
-                pt_node->matchIndex++;
             } else if (recv_buf.res_appendentries.success == false) {
-                pt_node->agreed = DISAGREED;
                 pt_node->nextIndex--;
+                pt_node->matchIndex--;
             } else {
                 perror("Error\n");
                 goto exit;
@@ -544,7 +537,36 @@ int main(int argc, char **argv) {
         case RPC_REQUESTVOTE:
             // 後々実装
             break;
-
+        case RES_REQUESTVOTE:
+            // 後々実装
+            break;
+        case CLIENT_REQUEST:
+            if (node_self->status == LEADER) {
+                printf("[Term: %u, LastLogIndex: %u] Recv ClientRequest from Node[%d]\t(Index : [%d] term : [%d] )\n",
+                       currentTerm, lastLogIndex, recv_buf.id, lastLogIndex + 1, currentTerm);
+                // クライアントからのログを積む
+                add_logentries(recv_buf.client_request.log_command);
+                // 安定記憶装置の更新
+                dump_logentries();
+                dump_term();
+            } else {
+                // リーダーでない場合はリクエストをリーダーにリダイレクトする
+                if (node_leader != NULL) {
+                    send_buf = recv_buf;
+                    tmp_addr = node_leader->serv_addr;
+                    tmp_addrlen = sizeof(struct sockaddr_in);
+                    printf("[Term: %u, LastLogIndex: %u] Redirect ClientRequest to Leader Node[%d]\n",
+                           currentTerm, lastLogIndex, node_leader->id);
+                    if (sendto(sock, &send_buf, sizeof(send_buf), 0,
+                               (struct sockaddr *)&tmp_addr, tmp_addrlen) < 0) {
+                        perror("sendto() failed");
+                        exit(EXIT_FAILURE);
+                    }
+                } else {
+                    printf("Leader unknown. Cannot redirect client request.\n");
+                }
+            }
+            break;
         default:
             break;
         }

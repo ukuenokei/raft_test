@@ -1,5 +1,7 @@
 #include <arpa/inet.h>
 #include <stdbool.h>
+#include <sys/time.h>
+#include <time.h>
 
 #define LOG_INDEX_MAX 100
 #define MAX_COMMAND_LEN 128
@@ -19,11 +21,13 @@ enum Agreed { UNDICIDED,
 enum NodeMap { ALIVE,
                DEAD };
 
-enum RPC_Type {
+enum Packet_Type {
     RPC_APPENDENTRIES,
     RES_APPENDENTRIES,
     RPC_REQUESTVOTE,
-    RES_REQUESTVOTE
+    RES_REQUESTVOTE,
+    CLIENT_REQUEST,
+    RES_CLIENT_REQUEST
 };
 
 typedef struct _Index {
@@ -41,7 +45,6 @@ typedef struct _Node_Info {
     unsigned int id;
     struct sockaddr_in serv_addr;
     enum Status status;
-    enum Agreed agreed;
     enum NodeMap nm;
     // Volatile state on leader: (選挙後に再初期化)
 
@@ -68,16 +71,19 @@ typedef struct {
     unsigned int prevLogIndex;
     // prevLogIndex のターム。
     unsigned int prevLogTerm;
-    // 保存するログエントリ (ハートビートの場合は空; FIXME:効率のため複数を送信することが可能)。
-    Log_Entry entries[MAX_SEND_ENTRIES];
     // 送られたエントリの長さ(nextがNULLになるまで回せば良いから後で消せる)
     unsigned int entries_len;
+    // 保存するログエントリ (ハートビートの場合は空; FIXME:効率のため複数を送信することが可能)。
+    Log_Entry entries;
+    // Log_Entry entries[MAX_SEND_ENTRIES];
     // リーダーの commitIndex。
     unsigned int leaderCommit;
 } Arg_AppendEntries;
 
 typedef struct {
     unsigned int term;
+    unsigned int prevLogIndex;
+    unsigned int entries_len;
     bool success;
 } Res_AppendEntries;
 
@@ -99,7 +105,8 @@ typedef struct {
 
 // クライアントリクエスト
 typedef struct {
-    char log_command[MAX_COMMAND_LEN]
+    unsigned int id;
+    char log_command[MAX_COMMAND_LEN];
 } ClientRequest;
 
 typedef struct {
@@ -109,7 +116,7 @@ typedef struct {
 } Res_ClientRequest;
 
 typedef struct {
-    enum RPC_Type RPC_type;
+    enum Packet_Type packet_type;
     unsigned int id;
     union {
         Arg_AppendEntries arg_appendentries;
@@ -117,5 +124,30 @@ typedef struct {
         Arg_RequestVote arg_requestvote;
         Res_RequestVote res_requestvote;
         ClientRequest client_request;
+        Res_ClientRequest res_clientrequest;
     };
 } Raft_Packet;
+
+int check_timeout(struct timespec std, struct timespec timeout) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    time_t sec_diff = now.tv_sec - std.tv_sec;
+    long nsec_diff = now.tv_nsec - std.tv_nsec;
+
+    if (nsec_diff < 0) {
+        sec_diff -= 1;
+        nsec_diff += 1000000000L;
+    }
+
+    if (sec_diff > timeout.tv_sec ||
+        (sec_diff == timeout.tv_sec && nsec_diff >= timeout.tv_nsec)) {
+        return 1; // timeout
+    }
+
+    return 0; // not yet
+}
+
+void reset_timer(struct timespec *timer) {
+    clock_gettime(CLOCK_MONOTONIC, timer);
+}
