@@ -65,18 +65,34 @@ unsigned int lastApplied;
 
 int init_nodeinfo() {
     Node_Info *tmp_node;
-    for (int i = 0; i < num_node; i++) {
+    FILE *fp;
+    char line[MAX_LINE_LEN];
+    int id;
+    char ip[32];
+    int port;
+    int idx = 0;
+
+    if (NULL == (fp = fopen("node_info.txt", "r"))) {
+        perror("Failed to open node_info.txt");
+        return -1;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        if (sscanf(line, "%d %31s %d", &id, ip, &port) != 3) {
+            continue; // フォーマット不正行はスキップ
+        }
         tmp_node = (Node_Info *)malloc(sizeof(Node_Info));
         if (tmp_node == NULL) {
             perror("Failed to allocate memory for node");
+            fclose(fp);
             return -1;
         }
-        tmp_node->id = i;
+        tmp_node->id = id;
         tmp_node->status = FOLLOWER;
         tmp_node->nm = ALIVE;
         tmp_node->serv_addr.sin_family = AF_INET;
-        tmp_node->serv_addr.sin_addr.s_addr = inet_addr(IP);
-        tmp_node->serv_addr.sin_port = htons(PORT + i);
+        tmp_node->serv_addr.sin_addr.s_addr = inet_addr(ip);
+        tmp_node->serv_addr.sin_port = htons(port);
         tmp_node->nextIndex = 1;
         tmp_node->matchIndex = 0;
         tmp_node->next = NULL;
@@ -88,10 +104,14 @@ int init_nodeinfo() {
             node_tail->next = tmp_node;
             node_tail = tmp_node;
         }
-        if (i == self_id) {
+        if (id == self_id) {
             node_self = tmp_node;
         }
+        idx++;
     }
+    fclose(fp);
+    num_node = idx;
+    return 0;
 }
 
 void cleanup_nodeinfo(void) {
@@ -433,7 +453,7 @@ int main(int argc, char **argv) {
     num_node = atoi(argv[1]);
     self_id = atoi(argv[2]);
 
-    leaderId = -1;
+    leaderId = LEADERID_NULL;
     node_head = NULL;
     node_tail = NULL;
     node_self = NULL;
@@ -491,7 +511,7 @@ int main(int argc, char **argv) {
     while (1) {
         apply_logentries(filename);
 
-        // 送信処理
+        /**********************************************************************************************************/
         switch (node_self->status) {
         case FOLLOWER:
             exceed_elto = check_timeout(el_std, el_to);
@@ -553,7 +573,7 @@ int main(int argc, char **argv) {
             break;
         }
 
-        // 受信処理
+        /**********************************************************************************************************/
         tmp_addrlen = sizeof(struct sockaddr_in);
         if (recvfrom(sock, &recv_buf, sizeof(recv_buf), 0,
                      (struct sockaddr *)&tmp_addr, &tmp_addrlen) < 0) {
@@ -578,8 +598,9 @@ int main(int argc, char **argv) {
             //     continue;
             // }
             reset_timer(&el_std);
-            raft_log("Recv AppendEntriesRPC from Leader Node[%d]\t(prevLogIndex : [%2d] entries_len : [%2d] term : [%2d])",
-                     recv_buf.id, recv_buf.arg_appendentries.prevLogIndex, recv_buf.arg_appendentries.entries_len, recv_buf.arg_appendentries.term);
+            raft_log("Recv AppendEntriesRPC from Leader Node[%d]\t(prevLogIndex : [%2d] entries_len : [%d] term : [%2d])",
+                     recv_buf.id, recv_buf.arg_appendentries.prevLogIndex,
+                     recv_buf.arg_appendentries.entries_len, recv_buf.arg_appendentries.term);
 
             // 候補者の状態でAppendEntriesRPCを受信した場合
             // (その RPC に含まれる) リーダーのタームが少なくとも候補者の現在のタームと同じ大きさの場合
@@ -609,7 +630,7 @@ int main(int argc, char **argv) {
 
             tmp_addr = node_leader->serv_addr;
             tmp_addrlen = sizeof(struct sockaddr_in);
-            raft_log("Send AppendEntriesRes to Leader Node[%d]\t(prevLogIndex : [%2d] term : [%2d] success : [%2d])",
+            raft_log("Send AppendEntriesRes to Leader Node[%d]\t(prevLogIndex : [%2d] term : [%2d] success : [%d])",
                      leaderId, recv_buf.arg_appendentries.prevLogIndex,
                      send_buf.res_appendentries.term, send_buf.res_appendentries.success);
             if (sendto(sock, &send_buf, sizeof(send_buf), 0,
@@ -618,26 +639,13 @@ int main(int argc, char **argv) {
                 exit(EXIT_FAILURE);
             }
 
-            // if (recv_buf.arg_appendentries.term >= currentTerm) {
-            //     raft_log("Become Follower\t(Term : [%2d])", recv_buf.arg_appendentries.term);
-            //     currentTerm = recv_buf.arg_appendentries.term;
-            //     node_self->status = FOLLOWER;
-            //     votedFor = VOTEDFOR_NULL;
-            //     reset_timer(&el_std);
-            //     leaderId = recv_buf.arg_appendentries.leaderId;
-            //     node_leader = get_node(leaderId);
-            // } else {
-            //     // RPC のタームが候補者の現在のタームより小さい場合、候補者は RPC を拒否し候補者状態を継続する。
-            //
-            // }
-
             break;
         // リーダーがフォロワーからAppendEntriesの返答を受信した場合
         case RES_APPENDENTRIES:
             if (node_self->status != LEADER) {
                 continue;
             }
-            raft_log("Recv AppendEntriesRes from Node[%d]\t(prevLogIndex : [%2d] entries_len : [%2d] term : [%2d] success : [%2d])",
+            raft_log("Recv AppendEntriesRes from Node[%d]\t(prevLogIndex : [%2d] entries_len : [%d] term : [%2d] success : [%d])",
                      pt_node->id, recv_buf.res_appendentries.prevLogIndex, recv_buf.res_appendentries.entries_len,
                      recv_buf.res_appendentries.term, recv_buf.res_appendentries.success);
             pt_node->nm = ALIVE;
@@ -751,6 +759,7 @@ int main(int argc, char **argv) {
         default:
             break;
         }
+        /**********************************************************************************************************/
     }
 /*****************************************************************************/
 exit:

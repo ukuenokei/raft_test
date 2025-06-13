@@ -6,8 +6,10 @@
 #define LOG_INDEX_MAX 100
 #define MAX_COMMAND_LEN 128
 #define MAX_SEND_ENTRIES 3
+#define MAX_LINE_LEN 256
 
 #define VOTEDFOR_NULL -1
+#define LEADERID_NULL -1
 
 int min(int a, int b) { return (a < b) ? a : b; }
 
@@ -46,7 +48,8 @@ typedef struct _Node_Info {
     struct sockaddr_in serv_addr;
     enum Status status;
     enum NodeMap nm;
-    // Volatile state on leader: (選挙後に再初期化)
+    // FIXME: statusとnmはプログラム内でちゃんと管理できていない
+    //  Volatile state on leader: (選挙後に再初期化)
 
     // 各サーバに対して、そのサーバに送信する次のログエントリのインデックス
     // (リーダーの最後のログインデックス + 1 に初期化)。

@@ -14,7 +14,7 @@ int main(int argc, char *argv[]) {
     int sock;
     struct sockaddr_in leader_addr;
     Raft_Packet send_pkt, recv_pkt;
-    socklen_t addrlen;
+    socklen_t tmp_addrlen;
     unsigned int leader_id = 0;      // 送信先リーダーID（必要に応じて変更）
     struct timeval timeout = {1, 0}; // 1秒タイムアウト
     struct timespec *ts;
@@ -35,7 +35,7 @@ int main(int argc, char *argv[]) {
     leader_addr.sin_family = AF_INET;
     leader_addr.sin_addr.s_addr = inet_addr(IP);
     leader_addr.sin_port = htons(PORT);
-    addrlen = sizeof(leader_addr);
+    tmp_addrlen = sizeof(leader_addr);
 
     int req_id = 1;
     while (1) {
@@ -47,10 +47,18 @@ int main(int argc, char *argv[]) {
 
         // 送信
         if (sendto(sock, &send_pkt, sizeof(send_pkt), 0,
-                   (struct sockaddr *)&leader_addr, addrlen) < 0) {
+                   (struct sockaddr *)&leader_addr, tmp_addrlen) < 0) {
             perror("sendto() failed");
         } else {
             printf("Sent ClientRequest: %s\n", send_pkt.client_request.log_command);
+        }
+        tmp_addrlen = sizeof(struct sockaddr_in);
+        if (recvfrom(sock, &recv_pkt, sizeof(recv_pkt), 0,
+                     (struct sockaddr *)&tmp_addr, &tmp_addrlen) < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                perror("recvfrom() failed");
+            }
+            continue;
         }
         req_id++;
         sleep(REQUEST_INTERVAL_SEC);
