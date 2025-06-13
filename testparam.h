@@ -4,6 +4,7 @@
 #define PORT 1000
 
 #define LEADER_ID 0
+#define CLIENT_ID 100
 #define LOG_MESSAGE "LOG_MESSAGE"
 #define STARTUP_LATANCY_SEC 3
 

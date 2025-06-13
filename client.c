@@ -8,7 +8,7 @@
 #include "raft.h"
 #include "testparam.h"
 
-#define REQUEST_INTERVAL_SEC 2
+#define REQUEST_INTERVAL_SEC 5
 
 int main(int argc, char *argv[]) {
     int sock;
@@ -42,7 +42,7 @@ int main(int argc, char *argv[]) {
         // 送信パケット作成
         memset(&send_pkt, 0, sizeof(send_pkt));
         send_pkt.packet_type = CLIENT_REQUEST;
-        send_pkt.id = 100;
+        send_pkt.id = CLIENT_ID;
         snprintf(send_pkt.client_request.log_command, MAX_COMMAND_LEN, "client_request_%d", req_id);
 
         // 送信

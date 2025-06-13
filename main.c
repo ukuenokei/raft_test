@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,12 +13,11 @@
 #include "raft.h"
 #include "testparam.h"
 
-#define RETRY_MAX 3
-#define RECVTIMEOUT_SEC 1
-#define RECVTIMEOUT_USEC 0
-#define ELECTIONTOMIN_MSEC 1500
-#define ELECTIONTOMAX_MSEC 3000
-#define HBINTERVAL_SEC 2
+#define RECVTIMEOUT_SEC 0
+#define RECVTIMEOUT_USEC 500000
+#define ELECTIONTOMIN_MSEC 3000
+#define ELECTIONTOMAX_MSEC 4000
+#define HBINTERVAL_SEC 1
 #define HBINTERVAL_USEC 0
 
 #define MAX_FILENAME_LEN 64
@@ -149,6 +149,24 @@ void randomize_electionto(struct timespec *elto) {
     elto->tv_nsec = (elto_ms % 1000) * 1000000L;
 }
 
+void raft_log(const char *fmt, ...) {
+    va_list args;
+    char timebuf[32];
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", tm_info);
+
+    // 時刻・インデックス・タームを先頭に表示
+    printf("[%s] [T: %u] [I: %u] [A: %u] [C: %u] ", timebuf, currentTerm, lastLogIndex, lastApplied, commitIndex);
+
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+
+    printf("\n");
+}
+
 int dump_term() {
     FILE *fp;
     char filename[MAX_FILENAME_LEN];
@@ -181,11 +199,18 @@ int dump_logentries() {
     FILE *fp;
     char filename[MAX_FILENAME_LEN];
     snprintf(filename, sizeof(filename), FILENAME_LOGENTRIES, node_self->id);
-    if (NULL == (fp = fopen(filename, "wb"))) {
+    // if (NULL == (fp = fopen(filename, "wb"))) {
+    //     perror("Cannot open Log file");
+    //     exit(EXIT_FAILURE);
+    // }
+    // fwrite(logEntries, sizeof(logEntries), 1, fp);
+    if (NULL == (fp = fopen(filename, "w"))) {
         perror("Cannot open Log file");
         exit(EXIT_FAILURE);
     }
-    fwrite(logEntries, sizeof(logEntries), 1, fp);
+    for (int i = 0; i <= lastLogIndex; i++) {
+        fprintf(fp, "%d\t%d\t%s\n", logEntries[i].term, i, logEntries[i].log_command);
+    }
 
     fclose(fp);
 }
@@ -204,7 +229,7 @@ int read_logentires() {
     return 0;
 }
 
-// クライアントから来たログを積む(仮)(Leader)
+// クライアントから来たログを積む(Leader)
 void add_logentries(const char *log_message) {
     char buffer[MAX_COMMAND_LEN];
     lastLogIndex++;
@@ -216,19 +241,23 @@ void add_logentries(const char *log_message) {
 }
 
 // 積まれたログをステートマシンに適用する(テキストファイルへの書き出し)
-int apply_logentries() {
+int apply_logentries(char *filename) {
     FILE *fp;
-    char filename[MAX_FILENAME_LEN];
-    snprintf(filename, sizeof(filename), FILENAME_APPLIEDLOG, node_self->id);
+
+    char timebuf[32];
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", tm_info);
     if (NULL == (fp = fopen(filename, "a"))) {
         perror("Cannot open Log file");
         exit(EXIT_FAILURE);
     }
     while (commitIndex > lastApplied) {
         lastApplied++;
-        fprintf(fp, "%d\t%d\t%s\n",
-                lastApplied, logEntries[lastApplied].term, logEntries[lastApplied].log_command);
-        printf("[Term: %u, LastLogIndex: %u] Log[%d] Applied\n", currentTerm, lastLogIndex, lastApplied);
+        fprintf(fp, "%s\t%d\t%d\t%s\n",
+                timebuf, lastApplied, logEntries[lastApplied].term, logEntries[lastApplied].log_command);
+        raft_log("Log[%d] Applied : %s", lastApplied, logEntries[lastApplied].log_command);
     }
 
     fclose(fp);
@@ -259,27 +288,23 @@ Res_AppendEntries AppendEntries(Arg_AppendEntries *arg_appendentries) {
     }
 
     //  ログを複製
-    for (int i = 0; i < arg_appendentries->entries_len; i++) {
-        tmpindex = arg_appendentries->prevLogIndex + 1 + i;
-        // 既存のエントリが新しいエントリと競合する場合 (同じインデックスだが異なるターム)
-        if (lastLogIndex >= tmpindex &&
-            logEntries[tmpindex].term != arg_appendentries->entries.term) {
-            // 既存のエントリとそれに続くものをすべて削除 (0埋めしてるだけ)
-            buf = (Log_Entry *)malloc(sizeof(Log_Entry));
-            memset(buf, 0, sizeof(Log_Entry));
-            for (int j = tmpindex; j <= lastLogIndex; j++) {
-                logEntries[j] = *buf;
+    if (arg_appendentries->entries_len != 0) {
+        for (int i = 0; i < arg_appendentries->entries_len; i++) {
+            tmpindex = arg_appendentries->prevLogIndex + 1 + i;
+            // tmpindex = arg_appendentries->prevLogIndex + 1;
+            // 既存のエントリが新しいエントリと競合する場合 (同じインデックスだが異なるターム)
+            if (logEntries[tmpindex].term != arg_appendentries->entries.term) {
+                // 既存のエントリとそれに続くものをすべて削除 (0埋めしてるだけ)
+                buf = (Log_Entry *)malloc(sizeof(Log_Entry));
+                memset(buf, 0, sizeof(Log_Entry));
+                for (int j = tmpindex; j <= lastLogIndex; j++) {
+                    logEntries[j] = *buf;
+                }
+                free(buf);
             }
-            free(buf);
-            lastLogIndex = tmpindex - 1;
-            res_appendentries.success = false;
-            printf("Log[%d] Term Mismatch\n", tmpindex);
-            return res_appendentries;
+            lastLogIndex = tmpindex;
+            logEntries[lastLogIndex] = arg_appendentries->entries;
         }
-        lastLogIndex++;
-        logEntries[tmpindex].term = arg_appendentries->term;
-        strcpy(logEntries[tmpindex].log_command,
-               arg_appendentries->entries.log_command);
     }
     // 自身のコミットインデックスを修正
     if (arg_appendentries->leaderCommit > commitIndex) {
@@ -289,7 +314,8 @@ Res_AppendEntries AppendEntries(Arg_AppendEntries *arg_appendentries) {
     return res_appendentries;
 }
 
-int AppendEntriesRPC(int sock, Node_Info *pt_node, Raft_Packet send_buf, unsigned int entries_len) {
+int AppendEntriesRPC(int sock, Node_Info *pt_node, unsigned int entries_len) {
+    Raft_Packet send_buf;
     struct sockaddr_in tmp_addr;
     socklen_t tmp_addrlen;
 
@@ -307,8 +333,8 @@ int AppendEntriesRPC(int sock, Node_Info *pt_node, Raft_Packet send_buf, unsigne
     send_buf.arg_appendentries.entries = logEntries[pt_node->nextIndex];
     send_buf.arg_appendentries.leaderCommit = commitIndex;
 
-    printf("[Term: %u, LastLogIndex: %u] Send AppendEntriesRPC to Node[%d]\t(prevLogIndex : [%d], entries_len: %d)\n",
-           currentTerm, lastLogIndex, pt_node->id, pt_node->nextIndex - 1, entries_len);
+    raft_log("Send AppendEntriesRPC to Node[%d]\t(prevLogIndex : [%d] entries_len: [%d])",
+             pt_node->id, pt_node->nextIndex - 1, entries_len);
 
     tmp_addr = pt_node->serv_addr;
     tmp_addrlen = sizeof(struct sockaddr_in);
@@ -347,6 +373,7 @@ int main(int argc, char **argv) {
     socklen_t tmp_addrlen;
     Node_Info *pt_node;
     Leader_Info *leader_info;
+    char filename[MAX_FILENAME_LEN];
 
     struct timeval timeout;
     unsigned int tmpindex, entries_len;
@@ -405,20 +432,27 @@ int main(int argc, char **argv) {
     }
 
     sleep(STARTUP_LATANCY_SEC);
-    printf("Program Start\n");
+    snprintf(filename, sizeof(filename), FILENAME_APPLIEDLOG, node_self->id);
+    remove(filename);
+    raft_log("Program Start");
     tmpindex = 0;
-    add_logentries("Program Start");
+    // add_logentries("Program Start");
     reset_timer(&hb_std);
 
     while (1) {
-        apply_logentries();
+        for (int i = lastLogIndex - 2; i <= lastLogIndex; i++) {
+            if (i > 0) {
+                printf("%d\t%s\n", i, logEntries[i].log_command);
+            }
+        }
+        apply_logentries(filename);
         // リーダーの送信処理
         switch (node_self->status) {
         case FOLLOWER:
             if (!check_timeout(el_std, el_to)) {
                 break;
             }
-            printf("[Term: %u, LastLogIndex: %u] HBTO\n", currentTerm, lastLogIndex);
+            // raft_log("HBTO");
             reset_timer(&el_std);
 
             break;
@@ -430,19 +464,16 @@ int main(int argc, char **argv) {
                     pt_node = pt_node->next;
                     continue;
                 }
+                // 未送信ログがある場合は即送信、なければハートビートタイムアウト時のみ送信
                 if (lastLogIndex >= pt_node->nextIndex) {
-                    // 未送信ログがある場合は即送信
-                    // entries_len = lastLogIndex - pt_node->nextIndex + 1;
-                    // if (entries_len > MAX_SEND_ENTRIES) {
-                    //     entries_len = MAX_SEND_ENTRIES;
-                    // }
                     entries_len = 1;
-                    AppendEntriesRPC(sock, pt_node, send_buf, entries_len);
                 } else if (check_timeout(hb_std, hb_to)) {
-                    // 未送信ログがなく、ハートビートタイムアウトならハートビート送信
                     entries_len = 0;
-                    AppendEntriesRPC(sock, pt_node, send_buf, entries_len);
+                } else {
+                    pt_node = pt_node->next;
+                    continue;
                 }
+                AppendEntriesRPC(sock, pt_node, entries_len);
                 pt_node = pt_node->next;
             }
             if (check_timeout(hb_std, hb_to)) {
@@ -461,19 +492,14 @@ int main(int argc, char **argv) {
             }
             continue;
         }
-        pt_node = get_node(recv_buf.id); // pt_nodeには受信したノードの情報が入る
-        if (pt_node == NULL) {
-            printf("Unknown node id: %d\n", recv_buf.id);
-            continue;
-        }
         switch (recv_buf.packet_type) {
         // フォロワーがリーダーからAppendEntriesRPCを受信した場合
         case RPC_APPENDENTRIES:
             if (node_self->status != FOLLOWER) {
                 continue;
             }
-            printf("[Term: %u, LastLogIndex: %u] Recv AppendEntriesRPC from Leader\t(prevLogIndex : [%d] entries_len : [%d] term : [%d] )\n",
-                   currentTerm, lastLogIndex, recv_buf.arg_appendentries.prevLogIndex, recv_buf.arg_appendentries.entries_len, recv_buf.arg_appendentries.term);
+            raft_log("Recv AppendEntriesRPC from Leader\t(prevLogIndex : [%d] entries_len : [%d] term : [%d])",
+                     recv_buf.arg_appendentries.prevLogIndex, recv_buf.arg_appendentries.entries_len, recv_buf.arg_appendentries.term);
             node_leader->status = ALIVE;
 
             // 安定記憶装置の更新
@@ -487,8 +513,8 @@ int main(int argc, char **argv) {
 
             tmp_addr = node_leader->serv_addr;
             tmp_addrlen = sizeof(struct sockaddr_in);
-            printf("[Term: %u, LastLogIndex: %u] Send AppendEntriesRes to Leader Node[%d]\t(prevLogIndex : [%d] term : [%d] Success : [%d])\n",
-                   currentTerm, lastLogIndex, leaderId, recv_buf.arg_appendentries.prevLogIndex, send_buf.res_appendentries.term, send_buf.res_appendentries.success);
+            raft_log("Send AppendEntriesRes to Leader Node[%d]\t(prevLogIndex : [%d] term : [%d] success : [%d])",
+                     leaderId, recv_buf.arg_appendentries.prevLogIndex, send_buf.res_appendentries.term, send_buf.res_appendentries.success);
             if (sendto(sock, &send_buf, sizeof(send_buf), 0,
                        (struct sockaddr *)&tmp_addr, tmp_addrlen) < 0) {
                 perror("sendto() failed");
@@ -500,28 +526,30 @@ int main(int argc, char **argv) {
             if (node_self->status != LEADER) {
                 continue;
             }
-            recv_buf.res_appendentries;
-
-            printf("[Term: %u, LastLogIndex: %u] Recv AppendEntriesRes from Node[%d]\t(prevLogIndex : [%d] entries_len : [%d] term : [%d] Success : [%d])\n",
-                   currentTerm, lastLogIndex, pt_node->id, recv_buf.res_appendentries.prevLogIndex, recv_buf.res_appendentries.entries_len,
-                   recv_buf.res_appendentries.term, recv_buf.res_appendentries.success);
+            pt_node = get_node(recv_buf.id); // pt_nodeには受信したノードの情報が入る
+            if (pt_node == NULL) {
+                printf("Unknown node id: %d\n", recv_buf.id);
+                continue;
+            }
+            raft_log("Recv AppendEntriesRes from Node[%d]\t(prevLogIndex : [%d] entries_len : [%d] term : [%d] success : [%d])",
+                     pt_node->id, recv_buf.res_appendentries.prevLogIndex, recv_buf.res_appendentries.entries_len,
+                     recv_buf.res_appendentries.term, recv_buf.res_appendentries.success);
             pt_node->nm = ALIVE;
             if (recv_buf.res_appendentries.success == true) {
                 // フォロワーにログを積んだ場合
-                if (recv_buf.res_appendentries.entries_len != 0) {
+                for (int i = 0; i < recv_buf.res_appendentries.entries_len; i++) {
                     // nextIndexには各ノードに直近送ったインデックスが入っている
-                    leader_info->num_agreed[pt_node->nextIndex]++;
-                    printf("[Term: %u, LastLogIndex: %u] Node[%d] Agreed about Log[%d]",
-                           currentTerm, lastLogIndex, pt_node->id, pt_node->nextIndex, leader_info->num_agreed[pt_node->nextIndex]);
-                    if (leader_info->num_agreed[pt_node->nextIndex] >= leader_info->majority) {
-                        printf("\tMajority Agreed\t(Index : [%d] Number of Agreed: [%d])",
-                               pt_node->nextIndex, leader_info->num_agreed[pt_node->nextIndex]);
-                        if (commitIndex < pt_node->nextIndex) {
+                    tmpindex = recv_buf.res_appendentries.prevLogIndex + 1 + i;
+                    leader_info->num_agreed[tmpindex]++;
+                    raft_log("Node[%d] Agreed about Log[%d] (Agreed: %d)", pt_node->id, tmpindex, leader_info->num_agreed[tmpindex]);
+                    if (leader_info->num_agreed[tmpindex] >= leader_info->majority) {
+                        raft_log("Majority Agreed\t(Index : [%d] Number of Agreed: [%d])", tmpindex, leader_info->num_agreed[tmpindex]);
+                        if (commitIndex < tmpindex) {
+                            // まだコミットされていないインデックスの場合はコミットする
                             commitIndex++;
-                            printf("\tCommit\t(Index : [%d])", commitIndex);
+                            raft_log("Commit\t(Index : [%d])", commitIndex);
                         }
                     }
-                    printf("\n");
                     pt_node->nextIndex += recv_buf.res_appendentries.entries_len;
                     pt_node->matchIndex += recv_buf.res_appendentries.entries_len;
                 }
@@ -542,8 +570,8 @@ int main(int argc, char **argv) {
             break;
         case CLIENT_REQUEST:
             if (node_self->status == LEADER) {
-                printf("[Term: %u, LastLogIndex: %u] Recv ClientRequest from Node[%d]\t(Index : [%d] term : [%d] )\n",
-                       currentTerm, lastLogIndex, recv_buf.id, lastLogIndex + 1, currentTerm);
+                raft_log("Recv ClientRequest from Node[%d]\t(Index : [%d] term : [%d])",
+                         recv_buf.id, lastLogIndex + 1, currentTerm);
                 // クライアントからのログを積む
                 add_logentries(recv_buf.client_request.log_command);
                 // 安定記憶装置の更新
@@ -555,8 +583,7 @@ int main(int argc, char **argv) {
                     send_buf = recv_buf;
                     tmp_addr = node_leader->serv_addr;
                     tmp_addrlen = sizeof(struct sockaddr_in);
-                    printf("[Term: %u, LastLogIndex: %u] Redirect ClientRequest to Leader Node[%d]\n",
-                           currentTerm, lastLogIndex, node_leader->id);
+                    raft_log("Redirect ClientRequest to Leader Node[%d]", node_leader->id);
                     if (sendto(sock, &send_buf, sizeof(send_buf), 0,
                                (struct sockaddr *)&tmp_addr, tmp_addrlen) < 0) {
                         perror("sendto() failed");
