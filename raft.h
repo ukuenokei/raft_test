@@ -128,7 +128,7 @@ typedef struct {
     };
 } Raft_Packet;
 
-int check_timeout(struct timespec std, struct timespec timeout) {
+bool check_timeout(struct timespec std, struct timespec timeout) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
 
@@ -142,10 +142,10 @@ int check_timeout(struct timespec std, struct timespec timeout) {
 
     if (sec_diff > timeout.tv_sec ||
         (sec_diff == timeout.tv_sec && nsec_diff >= timeout.tv_nsec)) {
-        return 1; // timeout
+        return true; // timeout
     }
 
-    return 0; // not yet
+    return false; // not yet
 }
 
 void reset_timer(struct timespec *timer) {

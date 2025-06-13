@@ -14,14 +14,15 @@
 #include "testparam.h"
 
 #define RECVTIMEOUT_SEC 0
-#define RECVTIMEOUT_USEC 500000
+#define RECVTIMEOUT_USEC 500
 #define ELECTIONTOMIN_MSEC 3000
 #define ELECTIONTOMAX_MSEC 4000
-#define HBINTERVAL_SEC 1
+#define HBINTERVAL_SEC 2
 #define HBINTERVAL_USEC 0
 
 #define MAX_FILENAME_LEN 64
 #define FILENAME_LOGENTRIES "logentires%d.dat"
+#define FILENAME_VOTEDFOR "votedFor%d.dat"
 #define FILENAME_TERM "term%d.dat"
 #define FILENAME_APPLIEDLOG "AppliedLog%d.txt"
 
@@ -29,8 +30,8 @@
 Node_Info *node_head, *node_tail, *node_self, *node_leader;
 unsigned int num_node;
 unsigned int self_id;
-unsigned int leaderId;
-struct timespec ts, el_to, el_std, hb_to, hb_std;
+int leaderId;
+struct timespec el_to, el_std, hb_to, hb_std;
 
 // Persistent state on all services: (RPC に応答する前に安定記憶装置を更新する)
 
@@ -124,6 +125,10 @@ int init_leader(Leader_Info *leader_info, unsigned int newleaderId) {
     Node_Info *pt_node;
     leaderId = newleaderId;
     node_leader = get_node(leaderId);
+    if (node_leader == NULL) {
+        printf("Leader Node[%d] not found\n", leaderId);
+        return -1;
+    }
     node_leader->status = LEADER;
     if (self_id == leaderId) {
         // 実装がいまいち、、、リーダーは合意したことにする
@@ -143,7 +148,7 @@ int init_leader(Leader_Info *leader_info, unsigned int newleaderId) {
 }
 
 void randomize_electionto(struct timespec *elto) {
-
+    // FIXME:選挙タムアウトの値を調整する
     int elto_ms = ELECTIONTOMIN_MSEC + (rand() % (ELECTIONTOMAX_MSEC - ELECTIONTOMIN_MSEC + 1));
     elto->tv_sec = elto_ms / 1000;
     elto->tv_nsec = (elto_ms % 1000) * 1000000L;
@@ -155,10 +160,12 @@ void raft_log(const char *fmt, ...) {
     time_t now = time(NULL);
     struct tm *tm_info = localtime(&now);
 
-    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", tm_info);
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%2d %H:%M:%S", tm_info);
+    snprintf(timebuf + strlen(timebuf), sizeof(timebuf) - strlen(timebuf), ".%03ld", tv.tv_usec / 1000);
 
-    // 時刻・インデックス・タームを先頭に表示
-    printf("[%s] [T: %u] [I: %u] [A: %u] [C: %u] ", timebuf, currentTerm, lastLogIndex, lastApplied, commitIndex);
+    printf("[%s] [T: %u] [I: %u] [A: %u] [C: %u] [V: %2d]", timebuf, currentTerm, lastLogIndex, lastApplied, commitIndex, votedFor);
 
     va_start(args, fmt);
     vprintf(fmt, args);
@@ -195,6 +202,20 @@ int read_term() {
     return 0;
 }
 
+int dump_votedFor() {
+    FILE *fp;
+    char filename[MAX_FILENAME_LEN];
+    snprintf(filename, sizeof(filename), FILENAME_VOTEDFOR, node_self->id);
+    if (NULL == (fp = fopen(filename, "w"))) {
+        perror("Cannot open VotedFor file");
+        exit(EXIT_FAILURE);
+    }
+    fprintf(fp, "%2d\n", votedFor);
+    // fwrite(&votedFor, sizeof(votedFor), 1, fp);
+
+    fclose(fp);
+}
+
 int dump_logentries() {
     FILE *fp;
     char filename[MAX_FILENAME_LEN];
@@ -209,7 +230,7 @@ int dump_logentries() {
         exit(EXIT_FAILURE);
     }
     for (int i = 0; i <= lastLogIndex; i++) {
-        fprintf(fp, "%d\t%d\t%s\n", logEntries[i].term, i, logEntries[i].log_command);
+        fprintf(fp, "%2d\t%2d\t%s\n", logEntries[i].term, i, logEntries[i].log_command);
     }
 
     fclose(fp);
@@ -248,16 +269,16 @@ int apply_logentries(char *filename) {
     time_t now = time(NULL);
     struct tm *tm_info = localtime(&now);
 
-    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", tm_info);
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%2d %H:%M:%S", tm_info);
     if (NULL == (fp = fopen(filename, "a"))) {
         perror("Cannot open Log file");
         exit(EXIT_FAILURE);
     }
     while (commitIndex > lastApplied) {
         lastApplied++;
-        fprintf(fp, "%s\t%d\t%d\t%s\n",
+        fprintf(fp, "%s\t%2d\t%2d\t%s\n",
                 timebuf, lastApplied, logEntries[lastApplied].term, logEntries[lastApplied].log_command);
-        raft_log("Log[%d] Applied : %s", lastApplied, logEntries[lastApplied].log_command);
+        raft_log("Log[%2d] Applied : %s", lastApplied, logEntries[lastApplied].log_command);
     }
 
     fclose(fp);
@@ -333,7 +354,7 @@ int AppendEntriesRPC(int sock, Node_Info *pt_node, unsigned int entries_len) {
     send_buf.arg_appendentries.entries = logEntries[pt_node->nextIndex];
     send_buf.arg_appendentries.leaderCommit = commitIndex;
 
-    raft_log("Send AppendEntriesRPC to Node[%d]\t(prevLogIndex : [%d] entries_len: [%d])",
+    raft_log("Send AppendEntriesRPC to Node[%d]\t(prevLogIndex : [%2d] entries_len: [%2d])",
              pt_node->id, pt_node->nextIndex - 1, entries_len);
 
     tmp_addr = pt_node->serv_addr;
@@ -349,20 +370,45 @@ int AppendEntriesRPC(int sock, Node_Info *pt_node, unsigned int entries_len) {
 Res_RequestVote Vote(Arg_RequestVote *arg_requestvote) {
     Res_RequestVote res_requestvote;
     res_requestvote.term = currentTerm;
-    res_requestvote.voteGranted = true;
+    res_requestvote.voteGranted = false;
     // 候補者のタームが現在のタームよりも古い場合は投票しない
     if (arg_requestvote->term < currentTerm) {
-        res_requestvote.voteGranted = false;
         return res_requestvote;
     }
     // もし votedFor が null または candidateId であり、候補者のログが少なくとも受信者のログと同じように最新のものである場合、投票が許可される
-    if (votedFor != VOTEDFOR_NULL && votedFor != arg_requestvote->candidateId) {
-        if (lastLogIndex > arg_requestvote->lastLogIndex || logEntries[lastLogIndex].term > arg_requestvote->lastLogTerm) {
-            res_requestvote.voteGranted = false;
-            return res_requestvote;
+    if (votedFor == VOTEDFOR_NULL || votedFor == arg_requestvote->candidateId) {
+        if (lastLogIndex <= arg_requestvote->lastLogIndex && logEntries[lastLogIndex].term <= arg_requestvote->lastLogTerm) {
+            votedFor = arg_requestvote->candidateId;
+            res_requestvote.voteGranted = true;
         }
     }
     return res_requestvote;
+}
+
+int RequestVoteRPC(int sock, Node_Info *pt_node) {
+    Raft_Packet send_buf;
+    struct sockaddr_in tmp_addr;
+    socklen_t tmp_addrlen;
+
+    memset(&send_buf, 0, sizeof(send_buf));
+    send_buf.packet_type = RPC_REQUESTVOTE;
+    send_buf.id = node_self->id;
+    send_buf.arg_requestvote.term = currentTerm;
+    send_buf.arg_requestvote.candidateId = self_id;
+    send_buf.arg_requestvote.lastLogIndex = lastLogIndex;
+    send_buf.arg_requestvote.lastLogTerm = logEntries[lastLogIndex].term;
+
+    raft_log("Send RequestVote to Node[%d]\t(Term : [%2d] lastLogIndex : [%2d] lastLogTerm : [%2d])",
+             pt_node->id, currentTerm, lastLogIndex, logEntries[lastLogIndex].term);
+
+    tmp_addr = pt_node->serv_addr;
+    tmp_addrlen = sizeof(struct sockaddr_in);
+    if (sendto(sock, &send_buf, sizeof(send_buf), 0,
+               (struct sockaddr *)&tmp_addr, tmp_addrlen) < 0) {
+        perror("sendto() failed");
+        exit(EXIT_FAILURE);
+    }
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -374,6 +420,8 @@ int main(int argc, char **argv) {
     Node_Info *pt_node;
     Leader_Info *leader_info;
     char filename[MAX_FILENAME_LEN];
+    bool exceed_hbto, exceed_elto, exceed_candto;
+    unsigned int num_votes;
 
     struct timeval timeout;
     unsigned int tmpindex, entries_len;
@@ -385,7 +433,7 @@ int main(int argc, char **argv) {
     num_node = atoi(argv[1]);
     self_id = atoi(argv[2]);
 
-    leaderId = LEADER_ID;
+    leaderId = -1;
     node_head = NULL;
     node_tail = NULL;
     node_self = NULL;
@@ -396,6 +444,7 @@ int main(int argc, char **argv) {
     commitIndex = 0;
     lastApplied = 0;
     lastLogIndex = 0;
+    votedFor = VOTEDFOR_NULL;
 
     timeout.tv_sec = RECVTIMEOUT_SEC;
     timeout.tv_usec = RECVTIMEOUT_USEC;
@@ -411,7 +460,7 @@ int main(int argc, char **argv) {
         perror("Failed to allocate memory for leader_info");
         exit(EXIT_FAILURE);
     }
-    init_leader(leader_info, LEADER_ID);
+    // init_leader(leader_info, LEADER_ID);
 
     if ((sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
         perror("socket() failed");
@@ -431,43 +480,47 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    sleep(STARTUP_LATANCY_SEC);
+    // sleep(STARTUP_LATANCY_SEC);
     snprintf(filename, sizeof(filename), FILENAME_APPLIEDLOG, node_self->id);
     remove(filename);
-    raft_log("Program Start");
-    tmpindex = 0;
-    // add_logentries("Program Start");
     reset_timer(&hb_std);
+    reset_timer(&el_std);
+    // 選挙タイムアウトを表示する
+    raft_log("Program Start\tElection Timeout : [%ld.%09ld]", el_to.tv_sec, el_to.tv_nsec);
 
     while (1) {
-        for (int i = lastLogIndex - 2; i <= lastLogIndex; i++) {
-            if (i > 0) {
-                printf("%d\t%s\n", i, logEntries[i].log_command);
-            }
-        }
         apply_logentries(filename);
-        // リーダーの送信処理
+
+        // 送信処理
         switch (node_self->status) {
         case FOLLOWER:
-            if (!check_timeout(el_std, el_to)) {
-                break;
+            exceed_elto = check_timeout(el_std, el_to);
+            // 選挙タイムアウトしていたら、候補者に遷移
+            if (exceed_elto) {
+                node_self->status = CANDIDATE;
+                currentTerm++;
+                votedFor = self_id;
+                num_votes = 1;
+                raft_log("Election Timeout Become Candidate\t(Term : [%2d])", currentTerm);
+                reset_timer(&el_std);
             }
-            // raft_log("HBTO");
-            reset_timer(&el_std);
-
             break;
 
         case LEADER:
+            if (exceed_hbto = check_timeout(hb_std, hb_to)) {
+                reset_timer(&hb_std);
+            }
             pt_node = node_head;
             while (pt_node) {
                 if (pt_node->id == self_id) {
                     pt_node = pt_node->next;
                     continue;
                 }
-                // 未送信ログがある場合は即送信、なければハートビートタイムアウト時のみ送信
+                // 未送信ログがある場合は即送信、ハートビートタイムアウトしていたら送信
+                // FIXME:失敗する(合意が得られていない)場合に無制限に処理を繰り返すようにする
                 if (lastLogIndex >= pt_node->nextIndex) {
                     entries_len = 1;
-                } else if (check_timeout(hb_std, hb_to)) {
+                } else if (exceed_hbto) {
                     entries_len = 0;
                 } else {
                     pt_node = pt_node->next;
@@ -476,13 +529,30 @@ int main(int argc, char **argv) {
                 AppendEntriesRPC(sock, pt_node, entries_len);
                 pt_node = pt_node->next;
             }
-            if (check_timeout(hb_std, hb_to)) {
-                reset_timer(&hb_std);
+
+            break;
+        case CANDIDATE:
+            // 投票が分散して候補者が決まらなかった場合、タームを増加させる
+            if (exceed_hbto = check_timeout(el_std, el_to)) {
+                reset_timer(&el_std);
+                currentTerm++;
             }
+            // RequestVote RPCを送信する
+            pt_node = node_head;
+            while (pt_node) {
+                if (pt_node->id == self_id) {
+                    pt_node = pt_node->next;
+                    continue;
+                }
+                RequestVoteRPC(sock, pt_node);
+                pt_node = pt_node->next;
+            }
+
             break;
         default:
             break;
         }
+
         // 受信処理
         tmp_addrlen = sizeof(struct sockaddr_in);
         if (recvfrom(sock, &recv_buf, sizeof(recv_buf), 0,
@@ -492,20 +562,46 @@ int main(int argc, char **argv) {
             }
             continue;
         }
+        pt_node = get_node(recv_buf.id); // pt_nodeには受信したノードの情報が入る
+        if (pt_node == NULL) {
+            printf("Unknown node id: %2d\n", recv_buf.id);
+            continue;
+        }
+        // 安定記憶装置の更新
+        dump_logentries();
+        dump_term();
+        dump_votedFor();
+
         switch (recv_buf.packet_type) {
-        // フォロワーがリーダーからAppendEntriesRPCを受信した場合
         case RPC_APPENDENTRIES:
-            if (node_self->status != FOLLOWER) {
-                continue;
+            // if (node_self->status != FOLLOWER) {
+            //     continue;
+            // }
+            reset_timer(&el_std);
+            raft_log("Recv AppendEntriesRPC from Leader Node[%d]\t(prevLogIndex : [%2d] entries_len : [%2d] term : [%2d])",
+                     recv_buf.id, recv_buf.arg_appendentries.prevLogIndex, recv_buf.arg_appendentries.entries_len, recv_buf.arg_appendentries.term);
+
+            // 候補者の状態でAppendEntriesRPCを受信した場合
+            // (その RPC に含まれる) リーダーのタームが少なくとも候補者の現在のタームと同じ大きさの場合
+            // 候補者はリーダーを正当なものとして認識しフォロワー状態に戻る。
+            if (node_self->status == CANDIDATE) {
+                if (recv_buf.arg_appendentries.term >= currentTerm) {
+                    raft_log("Become Follower\t(Term : [%2d])", recv_buf.arg_appendentries.term);
+                    currentTerm = recv_buf.arg_appendentries.term;
+                    node_self->status = FOLLOWER;
+                    leaderId = recv_buf.arg_appendentries.leaderId;
+                    init_leader(leader_info, leaderId);
+                }
+                // フォロワーの状態で新しいリーダーの誕生を知る
+            } else if (node_self->status == FOLLOWER) {
+                if (leaderId != recv_buf.arg_appendentries.leaderId) {
+                    raft_log("Recognize New Leader\t(Term : [%2d])", recv_buf.arg_appendentries.term);
+                    currentTerm = recv_buf.arg_appendentries.term;
+                    leaderId = recv_buf.arg_appendentries.leaderId;
+                    init_leader(leader_info, leaderId);
+                }
             }
-            raft_log("Recv AppendEntriesRPC from Leader\t(prevLogIndex : [%d] entries_len : [%d] term : [%d])",
-                     recv_buf.arg_appendentries.prevLogIndex, recv_buf.arg_appendentries.entries_len, recv_buf.arg_appendentries.term);
-            node_leader->status = ALIVE;
-
-            // 安定記憶装置の更新
-            dump_logentries();
-            dump_term();
-
+            node_leader->nm = ALIVE;
             // AppendEntriesを開始する
             send_buf.packet_type = RES_APPENDENTRIES;
             send_buf.id = node_self->id;
@@ -513,49 +609,57 @@ int main(int argc, char **argv) {
 
             tmp_addr = node_leader->serv_addr;
             tmp_addrlen = sizeof(struct sockaddr_in);
-            raft_log("Send AppendEntriesRes to Leader Node[%d]\t(prevLogIndex : [%d] term : [%d] success : [%d])",
-                     leaderId, recv_buf.arg_appendentries.prevLogIndex, send_buf.res_appendentries.term, send_buf.res_appendentries.success);
+            raft_log("Send AppendEntriesRes to Leader Node[%d]\t(prevLogIndex : [%2d] term : [%2d] success : [%2d])",
+                     leaderId, recv_buf.arg_appendentries.prevLogIndex,
+                     send_buf.res_appendentries.term, send_buf.res_appendentries.success);
             if (sendto(sock, &send_buf, sizeof(send_buf), 0,
                        (struct sockaddr *)&tmp_addr, tmp_addrlen) < 0) {
                 perror("sendto() failed");
                 exit(EXIT_FAILURE);
             }
+
+            // if (recv_buf.arg_appendentries.term >= currentTerm) {
+            //     raft_log("Become Follower\t(Term : [%2d])", recv_buf.arg_appendentries.term);
+            //     currentTerm = recv_buf.arg_appendentries.term;
+            //     node_self->status = FOLLOWER;
+            //     votedFor = VOTEDFOR_NULL;
+            //     reset_timer(&el_std);
+            //     leaderId = recv_buf.arg_appendentries.leaderId;
+            //     node_leader = get_node(leaderId);
+            // } else {
+            //     // RPC のタームが候補者の現在のタームより小さい場合、候補者は RPC を拒否し候補者状態を継続する。
+            //
+            // }
+
             break;
         // リーダーがフォロワーからAppendEntriesの返答を受信した場合
         case RES_APPENDENTRIES:
             if (node_self->status != LEADER) {
                 continue;
             }
-            pt_node = get_node(recv_buf.id); // pt_nodeには受信したノードの情報が入る
-            if (pt_node == NULL) {
-                printf("Unknown node id: %d\n", recv_buf.id);
-                continue;
-            }
-            raft_log("Recv AppendEntriesRes from Node[%d]\t(prevLogIndex : [%d] entries_len : [%d] term : [%d] success : [%d])",
+            raft_log("Recv AppendEntriesRes from Node[%d]\t(prevLogIndex : [%2d] entries_len : [%2d] term : [%2d] success : [%2d])",
                      pt_node->id, recv_buf.res_appendentries.prevLogIndex, recv_buf.res_appendentries.entries_len,
                      recv_buf.res_appendentries.term, recv_buf.res_appendentries.success);
             pt_node->nm = ALIVE;
             if (recv_buf.res_appendentries.success == true) {
                 // フォロワーにログを積んだ場合
                 for (int i = 0; i < recv_buf.res_appendentries.entries_len; i++) {
-                    // nextIndexには各ノードに直近送ったインデックスが入っている
                     tmpindex = recv_buf.res_appendentries.prevLogIndex + 1 + i;
                     leader_info->num_agreed[tmpindex]++;
-                    raft_log("Node[%d] Agreed about Log[%d] (Agreed: %d)", pt_node->id, tmpindex, leader_info->num_agreed[tmpindex]);
+                    raft_log("Node[%d] Agreed about Log[%2d] (Agreed: %2d)", pt_node->id, tmpindex, leader_info->num_agreed[tmpindex]);
                     if (leader_info->num_agreed[tmpindex] >= leader_info->majority) {
-                        raft_log("Majority Agreed\t(Index : [%d] Number of Agreed: [%d])", tmpindex, leader_info->num_agreed[tmpindex]);
+                        raft_log("Majority Agreed\t(Index : [%2d] Number of Agreed: [%2d])", tmpindex, leader_info->num_agreed[tmpindex]);
                         if (commitIndex < tmpindex) {
                             // まだコミットされていないインデックスの場合はコミットする
-                            commitIndex++;
-                            raft_log("Commit\t(Index : [%d])", commitIndex);
+                            commitIndex += recv_buf.res_appendentries.entries_len;
+                            raft_log("Commit\t(Index : [%2d])", commitIndex);
                         }
                     }
+                    pt_node->matchIndex = recv_buf.res_appendentries.prevLogIndex + recv_buf.res_appendentries.entries_len;
                     pt_node->nextIndex += recv_buf.res_appendentries.entries_len;
-                    pt_node->matchIndex += recv_buf.res_appendentries.entries_len;
                 }
             } else if (recv_buf.res_appendentries.success == false) {
                 pt_node->nextIndex--;
-                pt_node->matchIndex--;
             } else {
                 perror("Error\n");
                 goto exit;
@@ -563,20 +667,70 @@ int main(int argc, char **argv) {
 
             break;
         case RPC_REQUESTVOTE:
-            // 後々実装
+
+            // 実装中
+            raft_log("Recv RequestVoteRPC from Node[%d]\t(Term : [%2d] lastLogIndex : [%2d] lastLogTerm : [%2d])",
+                     recv_buf.id, recv_buf.arg_requestvote.term, recv_buf.arg_requestvote.lastLogIndex, recv_buf.arg_requestvote.lastLogTerm);
+
+            send_buf.packet_type = RES_REQUESTVOTE;
+            send_buf.id = node_self->id;
+            send_buf.res_requestvote = Vote(&recv_buf.arg_requestvote);
+            tmp_addr = pt_node->serv_addr;
+            tmp_addrlen = sizeof(struct sockaddr_in);
+            raft_log("Send RequestVoteRes to Node[%d]\t(Term : [%2d] voteGranted : [%2d])",
+                     pt_node->id, send_buf.res_requestvote.term, send_buf.res_requestvote.voteGranted);
+            if (sendto(sock, &send_buf, sizeof(send_buf), 0,
+                       (struct sockaddr *)&tmp_addr, tmp_addrlen) < 0) {
+                perror("sendto() failed");
+                exit(EXIT_FAILURE);
+            }
             break;
         case RES_REQUESTVOTE:
-            // 後々実装
+            if (node_self->status != CANDIDATE) {
+                continue;
+            }
+            // 過半数のサーバから投票があった場合: リーダーに転向。
+            raft_log("Recv RequestVoteRes from Node[%d]\t(Term : [%2d] voteGranted : [%2d])",
+                     recv_buf.id, recv_buf.res_requestvote.term, recv_buf.res_requestvote.voteGranted);
+            if (recv_buf.res_requestvote.voteGranted == true) {
+                num_votes++;
+                // raft_log("Node[%d] Vote Granted\t(Term : [%2d] lastLogIndex : [%2d] lastLogTerm : [%2d])",
+                //          recv_buf.id, recv_buf.arg_requestvote.term, recv_buf.arg_requestvote.lastLogIndex,
+                //          recv_buf.arg_requestvote.lastLogTerm);
+                if (num_votes >= (num_node / 2 + 1)) {
+                    // 過半数の投票を得た場合
+                    raft_log("Become Leader\t(Term : [%2d])", currentTerm);
+                    node_self->status = LEADER;
+                    votedFor = VOTEDFOR_NULL;
+                    init_leader(leader_info, self_id);
+                    // 当選したらAppendEntriesRPCを送信する
+                    entries_len = 0;
+                    pt_node = node_head;
+                    while (pt_node) {
+                        if (pt_node->id == self_id) {
+                            pt_node = pt_node->next;
+                            continue;
+                        }
+                        AppendEntriesRPC(sock, pt_node, entries_len);
+                        pt_node = pt_node->next;
+                    }
+                }
+            } else {
+                raft_log("Node[%d] Vote Denied\t(Term : [%2d] lastLogIndex : [%2d] lastLogTerm : [%2d])",
+                         recv_buf.id, recv_buf.arg_requestvote.term, recv_buf.arg_requestvote.lastLogIndex,
+                         recv_buf.arg_requestvote.lastLogTerm);
+            }
             break;
         case CLIENT_REQUEST:
             if (node_self->status == LEADER) {
-                raft_log("Recv ClientRequest from Node[%d]\t(Index : [%d] term : [%d])",
+                raft_log("Recv ClientRequest from Node[%d]\t(Index : [%2d] term : [%2d])",
                          recv_buf.id, lastLogIndex + 1, currentTerm);
                 // クライアントからのログを積む
                 add_logentries(recv_buf.client_request.log_command);
                 // 安定記憶装置の更新
                 dump_logentries();
                 dump_term();
+                dump_votedFor();
             } else {
                 // リーダーでない場合はリクエストをリーダーにリダイレクトする
                 if (node_leader != NULL) {
