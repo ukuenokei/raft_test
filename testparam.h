@@ -1,7 +1,12 @@
-#define MAX_NUM_NODE 5
-#define IP "127.0.0.1"
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 
-#define PORT 1000
+#define MAX_NUM_NODE 5
+#define CLIENT_IP "127.0.0.1"
+#define CLIENT_PORT 1000
 #define CLIENT_ID 100
 
 void print_sockaddr_in(const struct sockaddr_in *addr, const char *label) {

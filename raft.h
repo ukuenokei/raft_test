@@ -29,7 +29,7 @@ enum Packet_Type {
     RPC_REQUESTVOTE,
     RES_REQUESTVOTE,
     CLIENT_REQUEST,
-    RES_CLIENT_REQUEST
+    CLIENT_RESPONSE
 };
 
 typedef struct _Index {
@@ -116,7 +116,7 @@ typedef struct {
     unsigned int leaderId; // クライアントリクエストを受け取ったリーダーのID
     unsigned int id;       // クライアントリクエストのID
     bool sucess;
-} Res_ClientRequest;
+} ClientResponse;
 
 typedef struct {
     enum Packet_Type packet_type;
@@ -127,7 +127,7 @@ typedef struct {
         Arg_RequestVote arg_requestvote;
         Res_RequestVote res_requestvote;
         ClientRequest client_request;
-        Res_ClientRequest res_clientrequest;
+        ClientResponse client_response;
     };
 } Raft_Packet;
 
