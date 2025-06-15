@@ -83,7 +83,8 @@ int init_nodeinfo() {
     tmp_node = (Node_Info *)malloc(sizeof(Node_Info));
     if (tmp_node == NULL) {
       perror("Failed to allocate memory for node");
-      fclose(fp);
+      if (fp != NULL)
+        fclose(fp);
       return -1;
     }
     tmp_node->id = id;
@@ -108,7 +109,8 @@ int init_nodeinfo() {
     }
     idx++;
   }
-  fclose(fp);
+  if (fp != NULL)
+    fclose(fp);
   num_node = idx;
   return num_node;
 }
@@ -204,21 +206,22 @@ int dump_term() {
   }
   fwrite(&currentTerm, sizeof(currentTerm), 1, fp);
 
-  fclose(fp);
+  if (fp != NULL)
+    fclose(fp);
+  return 0;
 }
 
 int read_term() {
   FILE *fp;
   char filename[MAX_FILENAME_LEN];
-  Log_Entry buf;
   snprintf(filename, sizeof(filename), FILENAME_TERM, node_self->id);
   memset(logEntries, 0, sizeof(logEntries));
-  if (NULL == (fp = fopen(filename, "rb"))) {
-    perror("Cannot open Log file");
-    exit(EXIT_FAILURE);
+  currentTerm = 0;
+  if ((fp = fopen(filename, "rb")) != NULL) {
+    fread(&currentTerm, sizeof(currentTerm), 1, fp);
   }
-  fread(&currentTerm, sizeof(currentTerm), 1, fp);
-  fclose(fp);
+  if (fp != NULL)
+    fclose(fp);
   return 0;
 }
 
@@ -230,10 +233,26 @@ int dump_votedFor() {
     perror("Cannot open VotedFor file");
     exit(EXIT_FAILURE);
   }
-  fprintf(fp, "%2d\n", votedFor);
+  fprintf(fp, "%d\n", votedFor);
   // fwrite(&votedFor, sizeof(votedFor), 1, fp);
 
-  fclose(fp);
+  if (fp != NULL)
+    fclose(fp);
+  return 0;
+}
+
+int read_votedFor() {
+  FILE *fp;
+  char filename[MAX_FILENAME_LEN];
+  snprintf(filename, sizeof(filename), FILENAME_VOTEDFOR, node_self->id);
+  votedFor = VOTEDFOR_NULL;
+  if ((fp = fopen(filename, "rb")) != NULL) {
+    // fread(&votedFor, sizeof(votedFor), 1, fp);
+    fscanf(fp, "%d", &votedFor);
+  }
+  if (fp != NULL)
+    fclose(fp);
+  return 0;
 }
 
 int dump_logentries() {
@@ -248,25 +267,40 @@ int dump_logentries() {
   if (NULL == (fp = fopen(filename, "w"))) {
     perror("Cannot open Log file");
     exit(EXIT_FAILURE);
-  }
-  for (int i = 0; i <= lastLogIndex; i++) {
-    fprintf(fp, "%2d\t%2d\t%s\n", logEntries[i].term, i, logEntries[i].log_command);
+  } else {
+    for (int i = 0; i <= lastLogIndex; i++) {
+      fprintf(fp, "%2d\t%2d\t%s\n", logEntries[i].term, i, logEntries[i].log_command);
+    }
   }
 
-  fclose(fp);
+  if (fp != NULL)
+    fclose(fp);
+
+  return 0;
 }
 
 int read_logentires() {
   FILE *fp;
+  char line[MAX_LINE_LEN];
+  int i = 0;
   char filename[MAX_FILENAME_LEN];
   snprintf(filename, sizeof(filename), FILENAME_LOGENTRIES, node_self->id);
   memset(logEntries, 0, sizeof(logEntries));
-  if (NULL == (fp = fopen(filename, "rb"))) {
-    perror("Cannot open Log file");
-    exit(EXIT_FAILURE);
+  lastLogIndex = 0;
+  if ((fp = fopen(filename, "rb")) != NULL) {
+    while (fgets(line, sizeof(line), fp) != NULL) {
+      if (sscanf(line, "%d\t%d\t%s", &logEntries[i].term, &i, logEntries[i].log_command) != 3) {
+        continue;
+      }
+      lastLogIndex++;
+    }
+  } else {
+    logEntries[0].term = 0;
+    strncpy(logEntries[0].log_command, "Initial Log Entry", MAX_COMMAND_LEN - 1);
+    logEntries[0].log_command[MAX_COMMAND_LEN - 1] = '\0';
   }
-  fread(logEntries, sizeof(logEntries), 1, fp);
-  fclose(fp);
+  if (fp != NULL)
+    fclose(fp);
   return 0;
 }
 
@@ -298,7 +332,8 @@ int apply_logentries(char *filename, int index) {
           timebuf, index, logEntries[index].term, logEntries[index].log_command);
   raft_log("Log[%2d] Applied : %s", index, logEntries[index].log_command);
 
-  fclose(fp);
+  if (fp != NULL)
+    fclose(fp);
 
   return 0;
 }
@@ -456,11 +491,13 @@ int main(int argc, char **argv) {
   pt_node = NULL;
   num_node = init_nodeinfo();
 
-  currentTerm = 0;
   commitIndex = 0;
   lastApplied = 0;
   lastLogIndex = 0;
-  votedFor = VOTEDFOR_NULL;
+  // FIXME: 復帰した際にPersistent stateを読み込む
+  read_logentires();
+  read_term();
+  read_votedFor();
 
   timeout.tv_sec = RECVTIMEOUT_SEC;
   timeout.tv_usec = RECVTIMEOUT_USEC;
@@ -475,7 +512,6 @@ int main(int argc, char **argv) {
   srand(time(NULL) + self_id);
   randomize_electionto(&el_to);
 
-  memset(logEntries, 0, sizeof(logEntries));
   leader_info = (Leader_Info *)malloc(sizeof(Leader_Info));
   if (leader_info == NULL) {
     perror("Failed to allocate memory for leader_info");
@@ -506,9 +542,10 @@ int main(int argc, char **argv) {
   reset_timer(&hb_std);
   reset_timer(&el_std);
   // 選挙タイムアウトを表示する
-  raft_log("Program Start\tElection Timeout : [%ld.%09ld]", el_to.tv_sec, el_to.tv_nsec);
+  raft_log("Program Start\tElection Timeout Value : [%ld.%09ld]", el_to.tv_sec, el_to.tv_nsec);
 
   while (1) {
+    // ログの適用
     while (commitIndex > lastApplied) {
       lastApplied++;
       apply_logentries(filename, lastApplied);
@@ -646,8 +683,8 @@ int main(int argc, char **argv) {
 
       tmp_addr = node_leader->serv_addr;
       tmp_addrlen = sizeof(struct sockaddr_in);
-      raft_log("Send AppendEntriesRes to Leader Node[%d]\t(prevLogIndex : [%2d] term : [%2d] success : [%d])",
-               leaderId, recv_buf.arg_appendentries.prevLogIndex,
+      raft_log("Send AppendEntriesRes to Leader Node[%d]\t(prevLogIndex : [%2d] entries_len : [%d] term : [%2d] success : [%d])",
+               leaderId, recv_buf.arg_appendentries.prevLogIndex, recv_buf.arg_appendentries.entries_len,
                send_buf.res_appendentries.term, send_buf.res_appendentries.success);
       if (sendto(sock, &send_buf, sizeof(send_buf), 0,
                  (struct sockaddr *)&tmp_addr, tmp_addrlen) < 0) {
@@ -684,6 +721,7 @@ int main(int argc, char **argv) {
         }
       } else if (recv_buf.res_appendentries.success == false) {
         pt_node->nextIndex--;
+        // FIXME:たまに0になることがある、、、
       }
 
       break;
